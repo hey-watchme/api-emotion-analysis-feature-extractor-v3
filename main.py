@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-SUPERB感情分析API - 30秒チャンク処理版
+SUPERB感情分析API - OpenSMILE互換版
 wav2vec2-base-superb-erを使用した音声感情分析
-30秒ごとに分割して処理し、統合結果を返す
+S3からファイルを取得し、Supabaseに結果を保存
 """
 
 import os
 import gc
+import time
 import tempfile
 import json
 import librosa
@@ -14,23 +15,94 @@ import numpy as np
 import soundfile as sf
 from transformers import pipeline
 import torch
-from fastapi import FastAPI, File, UploadFile, HTTPException
+import boto3
+from botocore.exceptions import ClientError
+from dotenv import load_dotenv
+from supabase import create_client, Client
+
+from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+from models import (
+    HealthResponse,
+    ErrorResponse,
+    EmotionFeaturesRequest,
+    EmotionFeaturesResponse,
+    ChunkResult,
+    EmotionScore
+)
+from supabase_service import SupabaseService
+
+# 環境変数の読み込み
+load_dotenv()
 
 # FastAPIアプリケーションの初期化
 app = FastAPI(
-    title="SUPERB Emotion Recognition API",
-    description="30秒チャンクで処理する音声感情分析API",
-    version="2.0.0"
+    title="SUPERB Emotion Recognition API - OpenSMILE Compatible",
+    description="wav2vec2-base-superb-erを使用したfile_pathsベースの感情分析サービス",
+    version="3.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
 )
+
+# CORSミドルウェアの設定
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Supabaseクライアントの初期化
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY")
+if supabase_url and supabase_key:
+    supabase_client: Client = create_client(supabase_url, supabase_key)
+    supabase_service = SupabaseService(supabase_client)
+    print(f"✅ Supabase接続設定完了: {supabase_url}")
+else:
+    supabase_service = None
+    print("⚠️ Supabase環境変数が設定されていません")
+
+# AWS S3クライアントの初期化
+aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
+aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+s3_bucket_name = os.getenv('S3_BUCKET_NAME', 'watchme-vault')
+aws_region = os.getenv('AWS_REGION', 'us-east-1')
+
+if not aws_access_key_id or not aws_secret_access_key:
+    raise ValueError("AWS_ACCESS_KEY_IDおよびAWS_SECRET_ACCESS_KEYが設定されていません")
+
+s3_client = boto3.client(
+    's3',
+    aws_access_key_id=aws_access_key_id,
+    aws_secret_access_key=aws_secret_access_key,
+    region_name=aws_region
+)
+print(f"✅ AWS S3接続設定完了: バケット={s3_bucket_name}, リージョン={aws_region}")
 
 # グローバル変数でモデルを保持
 emotion_classifier = None
 
 # チャンク設定
 CHUNK_DURATION = 30.0  # 30秒固定
+
+# 感情ラベルの詳細情報
+LABELS_INFO = {
+    "ang": {"ja": "怒り", "en": "Angry", "group": "negative_active"},
+    "hap": {"ja": "喜び", "en": "Happy", "group": "positive_active"},
+    "sad": {"ja": "悲しみ", "en": "Sad", "group": "negative_passive"},
+    "neu": {"ja": "中立", "en": "Neutral", "group": "neutral"},
+    "exc": {"ja": "興奮", "en": "Excited", "group": "positive_active"},
+    "fru": {"ja": "欲求不満", "en": "Frustrated", "group": "negative_active"},
+    "sur": {"ja": "驚き", "en": "Surprised", "group": "neutral"},
+    "dis": {"ja": "嫌悪", "en": "Disgusted", "group": "negative_active"}
+}
+
 
 def init_model():
     """モデルを初期化"""
@@ -55,280 +127,373 @@ def init_model():
     )
     print("✅ モデルのロード完了！")
 
+
 # 起動時にモデルをロード
 @app.on_event("startup")
 async def startup_event():
     init_model()
 
-@app.get("/")
+
+def extract_info_from_file_path(file_path: str) -> dict:
+    """ファイルパスからデバイス情報を抽出
+    
+    Args:
+        file_path: 'files/device_id/date/time/audio.wav' 形式
+        
+    Returns:
+        dict: {'device_id': str, 'date': str, 'time_block': str}
+    """
+    parts = file_path.split('/')
+    if len(parts) >= 5:
+        return {
+            'device_id': parts[1],
+            'date': parts[2], 
+            'time_block': parts[3]
+        }
+    else:
+        raise ValueError(f"不正なファイルパス形式: {file_path}")
+
+
+async def update_audio_files_status(file_path: str) -> bool:
+    """audio_filesテーブルのemotion_features_statusを更新
+    
+    Args:
+        file_path: 処理完了したファイルのパス
+        
+    Returns:
+        bool: 更新成功可否
+    """
+    try:
+        update_response = supabase_client.table('audio_files') \
+            .update({'emotion_features_status': 'completed'}) \
+            .eq('file_path', file_path) \
+            .execute()
+        
+        if update_response.data:
+            print(f"✅ ステータス更新成功: {file_path}")
+            return True
+        else:
+            print(f"⚠️ 対象レコードが見つかりません: {file_path}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ ステータス更新エラー: {str(e)}")
+        return False
+
+
+def analyze_audio_file(audio_path: str) -> List[Dict]:
+    """
+    音声ファイルを30秒チャンクに分割して感情分析
+    
+    Args:
+        audio_path: 音声ファイルのパス
+    
+    Returns:
+        30秒ごとの感情分析結果リスト
+    """
+    if emotion_classifier is None:
+        raise RuntimeError("Model not loaded")
+    
+    # 音声読み込み
+    audio_data, sample_rate = sf.read(audio_path)
+    
+    # モノラルに変換
+    if len(audio_data.shape) > 1:
+        audio_data = np.mean(audio_data, axis=1)
+    
+    # 16kHzにリサンプリング
+    if sample_rate != 16000:
+        audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
+        sample_rate = 16000
+    
+    # 音声の総時間
+    total_duration = len(audio_data) / sample_rate
+    
+    # チャンクサイズ（サンプル数）
+    chunk_samples = int(CHUNK_DURATION * sample_rate)
+    
+    # チャンク処理結果を格納
+    chunks_results = []
+    
+    # チャンクごとに処理
+    chunk_id = 0
+    for start_idx in range(0, len(audio_data), chunk_samples):
+        chunk_id += 1
+        end_idx = min(start_idx + chunk_samples, len(audio_data))
+        
+        # チャンク情報
+        start_time = start_idx / sample_rate
+        end_time = end_idx / sample_rate
+        duration = end_time - start_time
+        
+        # チャンクを抽出
+        chunk = audio_data[start_idx:end_idx]
+        
+        # Float32に変換
+        chunk = chunk.astype(np.float32)
+        
+        # 正規化
+        max_val = np.max(np.abs(chunk))
+        if max_val > 0:
+            chunk = chunk / max_val
+        
+        # モデルで分析（全8感情を取得）
+        results = emotion_classifier(chunk, top_k=8)
+        
+        # 結果を整形
+        emotions = []
+        for result in results:
+            label = result['label']
+            score = float(result['score'])
+            info = LABELS_INFO.get(label, {"ja": label, "en": label, "group": "unknown"})
+            
+            emotions.append({
+                "label": label,
+                "score": round(score, 6),
+                "percentage": round(score * 100, 3),
+                "name_ja": info["ja"],
+                "name_en": info["en"],
+                "group": info["group"]
+            })
+        
+        # チャンク結果
+        chunk_result = {
+            "chunk_id": chunk_id,
+            "start_time": round(start_time, 1),
+            "end_time": round(end_time, 1),
+            "duration": round(duration, 1),
+            "emotions": emotions,
+            "primary_emotion": emotions[0] if emotions else None
+        }
+        
+        chunks_results.append(chunk_result)
+        
+        # メモリ解放
+        del chunk
+        gc.collect()
+    
+    # メモリ解放
+    del audio_data
+    gc.collect()
+    
+    return chunks_results, int(total_duration)
+
+
+@app.get("/", response_model=dict)
 async def root():
     """ルートエンドポイント"""
     return {
-        "message": "SUPERB Emotion Recognition API",
-        "version": "1.0.0",
+        "message": "SUPERB Emotion Recognition API - OpenSMILE Compatible",
+        "version": "3.0.0",
         "model": "wav2vec2-base-superb-er",
-        "endpoints": {
-            "health": "/health",
-            "analyze": "/analyze (POST with audio file)"
-        }
+        "docs": "/docs",
+        "health": "/health"
     }
 
-@app.get("/health")
+
+@app.get("/health", response_model=HealthResponse)
 async def health_check():
     """ヘルスチェックエンドポイント"""
-    return {
-        "status": "healthy",
-        "model_loaded": emotion_classifier is not None
-    }
+    try:
+        return HealthResponse(
+            status="healthy",
+            service="SUPERB API - OpenSMILE Compatible",
+            version="3.0.0",
+            model_loaded=emotion_classifier is not None
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Service unhealthy: {str(e)}"
+        )
 
-def analyze_chunk(audio_chunk: np.ndarray, chunk_info: Dict) -> Dict:
-    """
-    30秒チャンクを分析
-    """
-    # Float32に変換
-    audio_chunk = audio_chunk.astype(np.float32)
-    
-    # 正規化
-    max_val = np.max(np.abs(audio_chunk))
-    if max_val > 0:
-        audio_chunk = audio_chunk / max_val
-    
-    # モデルで分析（全8感情を取得）
-    results = emotion_classifier(audio_chunk, top_k=8)
-    
-    # ラベルの詳細情報
-    labels_info = {
-        "ang": {"ja": "怒り", "en": "Angry", "group": "negative_active"},
-        "hap": {"ja": "喜び", "en": "Happy", "group": "positive_active"},
-        "sad": {"ja": "悲しみ", "en": "Sad", "group": "negative_passive"},
-        "neu": {"ja": "中立", "en": "Neutral", "group": "neutral"},
-        "exc": {"ja": "興奮", "en": "Excited", "group": "positive_active"},
-        "fru": {"ja": "欲求不満", "en": "Frustrated", "group": "negative_active"},
-        "sur": {"ja": "驚き", "en": "Surprised", "group": "neutral"},
-        "dis": {"ja": "嫌悪", "en": "Disgusted", "group": "negative_active"}
-    }
-    
-    # 結果を整形
-    emotions = []
-    for result in results:
-        label = result['label']
-        score = float(result['score'])
-        info = labels_info.get(label, {"ja": label, "en": label, "group": "unknown"})
-        
-        emotions.append({
-            "label": label,
-            "score": round(score, 6),
-            "percentage": round(score * 100, 3),
-            "name_ja": info["ja"],
-            "name_en": info["en"],
-            "group": info["group"]
-        })
-    
-    # チャンク結果
-    return {
-        "chunk_id": chunk_info["id"],
-        "start_time": chunk_info["start"],
-        "end_time": chunk_info["end"],
-        "duration": chunk_info["duration"],
-        "emotions": emotions,
-        "primary_emotion": emotions[0] if emotions else None
-    }
 
-@app.post("/analyze")
-async def analyze_emotion(file: UploadFile = File(...)):
-    """
-    音声を30秒チャンクに分割して感情分析
-    各チャンクの結果と統合結果を返す
-    
-    Args:
-        file: アップロードされた音声ファイル（WAV, MP3等）
-    
-    Returns:
-        30秒ごとの感情分析結果と統合サマリー
-    """
-    if emotion_classifier is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
+@app.post("/process/emotion-features", response_model=EmotionFeaturesResponse)
+async def process_emotion_features(request: EmotionFeaturesRequest):
+    """file_pathsベースの感情分析（OpenSMILE互換）"""
+    start_time = time.time()
     
     try:
-        print(f"\n{'='*60}")
-        print(f"📁 分析開始: {file.filename}")
-        print(f"{'='*60}")
+        print(f"\n=== file_pathsベースによる感情分析開始 ===")
+        print(f"file_pathsパラメータ: {len(request.file_paths)}件のファイルを処理")
+        print(f"=" * 50)
         
-        # ファイル読み込み
-        contents = await file.read()
-        file_size_mb = len(contents) / 1024 / 1024
-        print(f"📦 ファイルサイズ: {file_size_mb:.2f}MB")
+        if not supabase_service:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Supabaseサービスが利用できません。環境変数を確認してください。"
+            )
         
-        # 一時ファイルに保存
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-            tmp_file.write(contents)
-            tmp_file_path = tmp_file.name
+        processed_files = 0
+        error_files = []
+        supabase_records = []
         
-        # メモリ解放
-        del contents
-        gc.collect()
-        
-        # 音声読み込み
-        audio_data, sample_rate = sf.read(tmp_file_path)
-        
-        # 一時ファイル削除
-        os.unlink(tmp_file_path)
-        
-        # モノラルに変換
-        if len(audio_data.shape) > 1:
-            audio_data = np.mean(audio_data, axis=1)
-        
-        # 16kHzにリサンプリング
-        if sample_rate != 16000:
-            print(f"🔄 リサンプリング: {sample_rate}Hz → 16000Hz")
-            audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
-            sample_rate = 16000
-        
-        # 音声の総時間
-        total_duration = len(audio_data) / sample_rate
-        print(f"📊 総時間: {total_duration:.1f}秒")
-        
-        # チャンクサイズ（サンプル数）
-        chunk_samples = int(CHUNK_DURATION * sample_rate)
-        
-        # チャンク処理結果を格納
-        chunks_results = []
-        
-        # チャンクごとに処理
-        chunk_id = 0
-        for start_idx in range(0, len(audio_data), chunk_samples):
-            chunk_id += 1
-            end_idx = min(start_idx + chunk_samples, len(audio_data))
-            
-            # チャンク情報
-            start_time = start_idx / sample_rate
-            end_time = end_idx / sample_rate
-            duration = end_time - start_time
-            
-            print(f"\n🔍 チャンク {chunk_id}: {start_time:.1f}秒 - {end_time:.1f}秒 ({duration:.1f}秒)")
-            
-            # チャンクを抽出
-            chunk = audio_data[start_idx:end_idx]
-            
-            # チャンク情報
-            chunk_info = {
-                "id": chunk_id,
-                "start": round(start_time, 1),
-                "end": round(end_time, 1),
-                "duration": round(duration, 1)
-            }
-            
-            # チャンクを分析
-            chunk_result = analyze_chunk(chunk, chunk_info)
-            chunks_results.append(chunk_result)
-            
-            # 結果をコンソールに表示
-            primary = chunk_result["primary_emotion"]
-            print(f"   主要感情: {primary['name_ja']} ({primary['percentage']:.1f}%)")
-            
-            # メモリ解放
-            del chunk
-            gc.collect()
-        
-        # メモリ解放
-        del audio_data
-        gc.collect()
-        
-        # 全体の統計を計算
-        all_emotions_sum = {}
-        for chunk in chunks_results:
-            for emotion in chunk["emotions"]:
-                label = emotion["label"]
-                if label not in all_emotions_sum:
-                    all_emotions_sum[label] = {
-                        "scores": [],
-                        "name_ja": emotion["name_ja"],
-                        "name_en": emotion["name_en"],
-                        "group": emotion["group"]
+        # 一時ディレクトリを作成してWAVファイルを処理
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for file_path in request.file_paths:
+                try:
+                    print(f"\n📥 S3からファイル取得開始: {file_path}")
+                    
+                    # ファイルパスから情報を抽出
+                    path_info = extract_info_from_file_path(file_path)
+                    device_id = path_info['device_id']
+                    date = path_info['date']
+                    time_block = path_info['time_block']
+                    
+                    # S3から一時ファイルにダウンロード
+                    temp_file_path = os.path.join(temp_dir, f"{time_block}.wav")
+                    
+                    try:
+                        s3_client.download_file(s3_bucket_name, file_path, temp_file_path)
+                        print(f"✅ S3ダウンロード成功: {file_path}")
+                    except ClientError as e:
+                        error_code = e.response['Error']['Code']
+                        if error_code == 'NoSuchKey':
+                            print(f"⚠️ ファイルが見つかりません: {file_path}")
+                            error_files.append(file_path)
+                            continue
+                        else:
+                            raise e
+                    
+                    print(f"🎵 感情分析開始: {file_path}")
+                    
+                    # 感情分析を実行
+                    analysis_start = time.time()
+                    chunks_results, duration_seconds = analyze_audio_file(temp_file_path)
+                    processing_time = time.time() - analysis_start
+                    
+                    processed_files += 1
+                    
+                    # Supabase用のレコードを準備
+                    # features_timelineは空配列（OpenSMILEとの互換性のため）
+                    # selected_features_timelineにSUPERBの結果を保存
+                    supabase_record = {
+                        "device_id": device_id,
+                        "date": date,
+                        "time_block": time_block,
+                        "filename": os.path.basename(file_path),
+                        "duration_seconds": duration_seconds,
+                        "features_timeline": [],  # OpenSMILEの特徴量（空）
+                        "selected_features_timeline": chunks_results,  # SUPERBの感情分析結果
+                        "processing_time": processing_time,
+                        "error": None
                     }
-                all_emotions_sum[label]["scores"].append(emotion["score"])
+                    supabase_records.append(supabase_record)
+                    
+                    # audio_filesテーブルのステータスを更新
+                    await update_audio_files_status(file_path)
+                    
+                    # 主要感情を表示
+                    if chunks_results:
+                        for chunk in chunks_results:
+                            primary = chunk["primary_emotion"]
+                            print(f"  チャンク{chunk['chunk_id']}: {primary['name_ja']} ({primary['percentage']:.1f}%)")
+                    
+                    print(f"✅ 完了: {file_path} → {len(chunks_results)}チャンクの感情分析完了")
+                    
+                except Exception as e:
+                    error_files.append(file_path)
+                    print(f"❌ エラー: {file_path} - {str(e)}")
+                    
+                    # エラーレコードもSupabaseに保存
+                    try:
+                        path_info = extract_info_from_file_path(file_path)
+                        supabase_record = {
+                            "device_id": path_info['device_id'],
+                            "date": path_info['date'],
+                            "time_block": path_info['time_block'],
+                            "filename": os.path.basename(file_path),
+                            "duration_seconds": 0,
+                            "features_timeline": [],
+                            "selected_features_timeline": [],
+                            "processing_time": 0,
+                            "error": str(e)
+                        }
+                        supabase_records.append(supabase_record)
+                    except:
+                        pass
         
-        # 平均スコアを計算
-        emotion_averages = []
-        for label, data in all_emotions_sum.items():
-            avg_score = sum(data["scores"]) / len(data["scores"])
-            emotion_averages.append({
-                "label": label,
-                "average_score": round(avg_score, 6),
-                "average_percentage": round(avg_score * 100, 3),
-                "name_ja": data["name_ja"],
-                "name_en": data["name_en"],
-                "group": data["group"],
-                "appearances": len(data["scores"])
-            })
+        # Supabaseにバッチで保存
+        print(f"\n=== Supabase保存開始 ===")
+        print(f"保存対象: {len(supabase_records)} レコード")
+        print(f"=" * 50)
         
-        # スコアでソート
-        emotion_averages.sort(key=lambda x: x["average_score"], reverse=True)
+        saved_count = 0
+        save_errors = []
         
-        # グループごとの統計
-        group_stats = {}
-        for chunk in chunks_results:
-            for emotion in chunk["emotions"]:
-                group = emotion["group"]
-                if group not in group_stats:
-                    group_stats[group] = []
-                group_stats[group].append(emotion["score"])
-        
-        group_averages = {}
-        for group, scores in group_stats.items():
-            group_averages[group] = {
-                "average_score": round(sum(scores) / len(scores), 4),
-                "average_percentage": round((sum(scores) / len(scores)) * 100, 2),
-                "total_appearances": len(scores)
-            }
-        
-        # 最も強いグループを特定
-        dominant_group = max(group_averages.items(), key=lambda x: x[1]["average_score"])
+        if supabase_records:
+            try:
+                # バッチでUPSERT実行
+                await supabase_service.batch_upsert_emotion_data(supabase_records)
+                saved_count = len(supabase_records)
+                print(f"✅ Supabase保存成功: {saved_count} レコード")
+            except Exception as e:
+                print(f"❌ Supabaseバッチ保存エラー: {str(e)}")
+                # 個別に保存を試みる
+                for record in supabase_records:
+                    try:
+                        await supabase_service.upsert_emotion_data(
+                            device_id=record["device_id"],
+                            date=record["date"],
+                            time_block=record["time_block"],
+                            filename=record["filename"],
+                            duration_seconds=record["duration_seconds"],
+                            features_timeline=record["features_timeline"],
+                            processing_time=record["processing_time"],
+                            error=record.get("error"),
+                            selected_features_timeline=record.get("selected_features_timeline")
+                        )
+                        saved_count += 1
+                    except Exception as individual_error:
+                        save_errors.append(f"{record['time_block']}: {str(individual_error)}")
+                        print(f"❌ 個別保存エラー: {record['time_block']} - {str(individual_error)}")
         
         # レスポンス作成
-        response = {
-            "success": True,
-            "filename": file.filename,
-            "file_size_mb": round(file_size_mb, 2),
-            "file_info": {
-                "total_duration": round(total_duration, 1),
-                "sample_rate": sample_rate,
-                "total_chunks": len(chunks_results),
-                "chunk_duration": CHUNK_DURATION
-            },
-            "chunks": chunks_results,
-            "summary": {
-                "overall_primary_emotion": emotion_averages[0] if emotion_averages else None,
-                "emotion_averages": emotion_averages,
-                "group_statistics": group_averages,
-                "dominant_group": {
-                    "name": dominant_group[0],
-                    "data": dominant_group[1]
-                }
-            }
-        }
+        total_time = time.time() - start_time
         
-        # コンソールに最終サマリーを表示
-        print(f"\n{'='*60}")
-        print(f"📊 最終サマリー:")
-        print(f"{'='*60}")
-        print(f"総チャンク数: {len(chunks_results)}")
-        print(f"総時間: {total_duration:.1f}秒")
-        print(f"\n全体を通しての主要感情:")
-        for i, emotion in enumerate(emotion_averages[:3]):
-            print(f"{i+1}. {emotion['name_ja']:8} {emotion['average_percentage']:6.2f}%")
-        print(f"\n支配的な感情グループ: {dominant_group[0]}")
-        print(f"  平均スコア: {dominant_group[1]['average_percentage']:.1f}%")
-        print(f"{'='*60}\n")
+        print(f"\n=== file_pathsベースによる感情分析完了 ===")
+        print(f"📥 S3処理: {processed_files} ファイル")
+        print(f"💾 Supabase保存: {saved_count} レコード")
+        print(f"❌ エラー: {len(error_files)} ファイル")
+        print(f"⏱️ 総処理時間: {total_time:.2f}秒")
+        print(f"=" * 50)
         
-        return JSONResponse(content=response)
+        return EmotionFeaturesResponse(
+            success=True,
+            processed_files=processed_files,
+            saved_count=saved_count,
+            error_files=error_files,
+            total_processing_time=total_time,
+            message=f"S3から{processed_files}個のファイルを処理し、{saved_count}個のレコードをSupabaseに保存しました"
+        )
         
+    except HTTPException:
+        raise
     except Exception as e:
-        import traceback
-        print(f"❌ エラー: {str(e)}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"感情分析処理中にエラーが発生しました: {str(e)}"
+        )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    """グローバル例外ハンドラー"""
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content=ErrorResponse(
+            error="Internal server error",
+            detail=str(exc)
+        ).dict()
+    )
+
 
 if __name__ == "__main__":
-    # ポート8018で起動
-    uvicorn.run(app, host="0.0.0.0", port=8018, reload=False)
+    # ポート8018で起動（OpenSMILEは8011）
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8018,
+        reload=True,
+        log_level="info"
+    )

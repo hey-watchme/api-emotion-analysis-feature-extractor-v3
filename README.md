@@ -1,22 +1,19 @@
 # SUPERB 音声感情分析 API
 
-wav2vec2-base-superb-erモデルを使用した音声感情分析APIサービスです。音声ファイルを30秒チャンクに分割して処理し、8種類の感情を検出・スコアリングします。
+wav2vec2-base-superb-erモデルを使用した音声感情分析APIサービスです。AWS S3から音声ファイルを取得し、30秒チャンクに分割して処理し、8種類の感情を検出してSupabaseに保存します。
 
-## ⚠️ 重要な注意事項
+## 📊 システム概要
 
-- **30秒チャンク処理が必須**: 長い音声は自動的に30秒ごとに分割して処理されます
-- **メモリ制限**: 30秒を超える一括処理はメモリ不足でクラッシュする可能性があります
-- **推奨音声長**: 30秒〜5分程度が最適（それ以上も処理可能ですが時間がかかります）
+このAPIはOpenSMILE APIの代替として開発され、既存のシステムと完全な互換性を保ちながら、より高度な感情分析機能を提供します。
 
-## 🎯 機能
+### 主な特徴
+- **OpenSMILE API互換**: 同じエンドポイント、同じデータ構造
+- **S3統合**: AWS S3から音声ファイルを自動取得
+- **Supabase連携**: `emotion_opensmile`テーブルに結果を保存
+- **30秒チャンク処理**: メモリ効率的な分割処理
+- **8感情分析**: wav2vec2-base-superb-erによる詳細な感情検出
 
-- 音声ファイル（WAV, MP3等）からの感情分析
-- **30秒チャンク単位での安定処理**
-- 8種類の感情検出（全感情のスコアを出力）
-- 感情グループ化による包括的な分析
-- Apple Silicon/GPU対応による高速処理
-
-## 📊 検出可能な8つの感情
+## 🎯 検出可能な8つの感情
 
 | ラベル | 日本語 | 英語 | グループ |
 |--------|--------|------|----------|
@@ -40,6 +37,8 @@ wav2vec2-base-superb-erモデルを使用した音声感情分析APIサービス
 - Python 3.8以上
 - 4GB以上のメモリ（モデル読み込み用）
 - Apple Silicon Mac または CUDA対応GPU（オプション、CPU動作も可）
+- AWS S3アクセス権限
+- Supabaseプロジェクト
 
 ## 🚀 セットアップ
 
@@ -58,15 +57,23 @@ pip3 install -r requirements.txt
 
 初回実行時は、Hugging Faceから約400MBのモデルがダウンロードされます。
 
-### 3. モデルの動作確認（オプション）
+### 3. 環境変数の設定
 
-```bash
-python3 test_model.py
+`.env`ファイルを作成し、以下の設定を記入：
+
+```env
+# Supabase設定
+SUPABASE_URL=your_supabase_url
+SUPABASE_KEY=your_supabase_key
+
+# AWS S3設定
+AWS_ACCESS_KEY_ID=your_aws_access_key_id
+AWS_SECRET_ACCESS_KEY=your_aws_secret_access_key
+S3_BUCKET_NAME=your_s3_bucket_name
+AWS_REGION=us-east-1
 ```
 
-## 🎮 使い方
-
-### APIサーバーの起動
+### 4. APIサーバーの起動
 
 ```bash
 python3 main.py
@@ -74,135 +81,130 @@ python3 main.py
 
 サーバーはポート8018で起動します：
 - http://localhost:8018
+- Swagger UI: http://localhost:8018/docs
+- ReDoc: http://localhost:8018/redoc
 
-### APIエンドポイント
+## 🔄 API仕様（OpenSMILE互換）
 
-#### 1. ルート情報
-```bash
-curl http://localhost:8018/
-```
+### メインエンドポイント
 
-#### 2. ヘルスチェック
-```bash
-curl http://localhost:8018/health
-```
+#### POST /process/emotion-features
+S3から音声ファイルを取得して感情分析を実行
 
-#### 3. 感情分析（メインエンドポイント）
-```bash
-# 音声ファイルを分析
-curl -X POST http://localhost:8018/analyze \
-  -F "file=@your_audio.wav"
-```
-
-### レスポンス形式
-
+**リクエスト:**
 ```json
 {
-  "success": true,
-  "filename": "audio.wav",
-  "file_size_mb": 8.0,
-  "file_info": {
-    "total_duration": 261.0,
-    "sample_rate": 16000,
-    "total_chunks": 9,
-    "chunk_duration": 30.0
-  },
-  "chunks": [
-    {
-      "chunk_id": 1,
-      "start_time": 0.0,
-      "end_time": 30.0,
-      "duration": 30.0,
-      "emotions": [
-        {
-          "label": "ang",
-          "score": 0.7862,
-          "percentage": 78.62,
-          "name_ja": "怒り",
-          "name_en": "Angry",
-          "group": "negative_active"
-        },
-        // ... 他の7感情
-      ],
-      "primary_emotion": {
-        "label": "ang",
-        "score": 0.7862,
-        "percentage": 78.62,
-        "name_ja": "怒り",
-        "name_en": "Angry",
-        "group": "negative_active"
-      }
-    },
-    // ... 他のチャンク
-  ],
-  "summary": {
-    "overall_primary_emotion": {
-      "label": "ang",
-      "average_score": 0.5530,
-      "average_percentage": 55.30,
-      "name_ja": "怒り",
-      "name_en": "Angry",
-      "group": "negative_active"
-    },
-    "emotion_averages": [
-      // 8感情の平均スコア（降順）
-    ],
-    "group_statistics": {
-      "negative_active": {
-        "average_score": 0.5529,
-        "average_percentage": 55.29,
-        "total_appearances": 72
-      },
-      // ... 他のグループ
-    },
-    "dominant_group": {
-      "name": "negative_active",
-      "data": {
-        "average_percentage": 55.29
-      }
-    }
-  }
+  "file_paths": [
+    "files/device_id/2025-09-12/20-30/audio.wav"
+  ]
 }
 ```
 
-## 🏗️ プロジェクト構成
-
+**レスポンス:**
+```json
+{
+  "success": true,
+  "processed_files": 1,
+  "saved_count": 1,
+  "error_files": [],
+  "total_processing_time": 5.15,
+  "message": "S3から1個のファイルを処理し、1個のレコードをSupabaseに保存しました"
+}
 ```
-superb/
-├── main.py                 # FastAPI アプリケーション（30秒チャンク処理）
-├── test_model.py          # モデル動作確認スクリプト
-├── generate_test_audio.py # テスト音声生成スクリプト
-├── requirements.txt       # 依存パッケージ
-├── test_neutral.wav       # テスト音声（中立）
-├── test_angry.wav         # テスト音声（怒り）
-├── test_sad.wav          # テスト音声（悲しみ）
-└── README.md             # このファイル
+
+### その他のエンドポイント
+
+#### GET /
+API情報の取得
+
+#### GET /health
+ヘルスチェック
+
+## 💾 データベース構造
+
+### emotion_opensmileテーブル
+```sql
+create table public.emotion_opensmile (
+  device_id text not null,
+  date date not null,
+  time_block text not null,
+  filename text,
+  duration_seconds integer,
+  features_timeline jsonb,  -- OpenSMILE特徴量（SUPERBでは空）
+  selected_features_timeline jsonb,  -- SUPERB感情分析結果
+  processing_time double precision,
+  error text,
+  status text default 'pending'
+);
+```
+
+### selected_features_timelineの構造
+```json
+[
+  {
+    "chunk_id": 1,
+    "start_time": 0.0,
+    "end_time": 30.0,
+    "duration": 30.0,
+    "emotions": [
+      {
+        "label": "hap",
+        "score": 0.387932,
+        "percentage": 38.793,
+        "name_ja": "喜び",
+        "name_en": "Happy",
+        "group": "positive_active"
+      }
+      // ... 他の7感情
+    ],
+    "primary_emotion": {
+      "label": "hap",
+      "score": 0.387932,
+      "percentage": 38.793,
+      "name_ja": "喜び",
+      "name_en": "Happy",
+      "group": "positive_active"
+    }
+  }
+  // ... 他のチャンク
+]
 ```
 
 ## ⚙️ 技術仕様
 
-### 処理方式
-- **30秒チャンク分割処理**: メモリ効率とパフォーマンスの最適化
-- **順次処理**: 各チャンクを順番に処理してメモリを解放
-- **全8感情出力**: すべての感情スコアを取得して詳細な分析
+### 処理フロー
+1. S3から音声ファイルをダウンロード
+2. 30秒チャンクに分割
+3. 各チャンクをwav2vec2-base-superb-erで分析
+4. 結果をSupabaseの`selected_features_timeline`に保存
+5. `audio_files`テーブルのステータスを更新
 
 ### モデル仕様
 - **モデル**: `superb/wav2vec2-base-superb-er` (Hugging Face)
-- **フレームワーク**: FastAPI 
+- **フレームワーク**: FastAPI + PyTorch
 - **音声処理**: librosa (16kHz リサンプリング)
-- **推論**: PyTorch (CPU/GPU/Apple Silicon対応)
 - **サンプリングレート**: 16kHz (自動変換)
 - **対応フォーマット**: WAV, MP3, その他soundfile対応形式
 
+## 📈 パフォーマンス
+
+- **30秒音声**: 約2-3秒で処理
+- **60秒音声（2チャンク）**: 約5秒で処理
+- **メモリ使用量**: 約1-2GB（モデル + 処理中のデータ）
+
+## ⚠️ 既知の制限事項
+
+### 精度に関する注意
+- **英語データでの訓練**: このモデルは主に英語データで訓練されています
+- **感情の誤認識**: 怒りの音声が「喜び」として認識される場合があります
+- **音質の影響**: ノイズが多い環境では精度が低下します
+- **推奨**: 全体的な感情グループ（negative_active等）で判断することを推奨
+
+### 技術的制限
+- 30秒を超える音声は自動的に分割処理
+- 極端に長い音声（10分以上）は処理時間が長くなります
+
 ## 🐛 トラブルシューティング
-
-### メモリエラー / フリーズ
-- **原因**: 30秒を超える音声を一括処理しようとした場合
-- **解決**: このAPIは自動的に30秒チャンクに分割するため、通常は発生しません
-- **注意**: 極端に長い音声（10分以上）は処理時間が長くなります
-
-### モデルのダウンロードが遅い
-初回実行時は約400MBのモデルをダウンロードするため時間がかかります。安定したネットワーク環境で実行してください。
 
 ### ポート8018が使用中
 ```bash
@@ -212,16 +214,27 @@ lsof -i :8018
 kill -9 <PID>
 ```
 
-### 精度に関する注意
-- このモデルは主に英語データで訓練されています
-- 日本語音声では「怒り」と「喜び」が混同される場合があります
-- 全体的な感情グループ（negative_active等）で判断することを推奨
+### モデルのダウンロードが遅い
+初回実行時は約400MBのモデルをダウンロードするため時間がかかります。安定したネットワーク環境で実行してください。
 
-## 📈 パフォーマンス
+### S3アクセスエラー
+AWS認証情報と権限を確認してください。
 
-- **30秒音声**: 約2-3秒で処理
-- **5分音声（10チャンク）**: 約20-30秒で処理
-- **メモリ使用量**: 約1-2GB（モデル + 処理中のデータ）
+## 🏗️ プロジェクト構成
+
+```
+superb/
+├── main.py                    # FastAPIアプリケーション（OpenSMILE互換）
+├── main_original.py           # 元のローカル版実装
+├── models.py                  # Pydanticモデル定義
+├── supabase_service.py        # Supabaseサービスレイヤー
+├── requirements.txt           # 依存パッケージ
+├── .env                      # 環境変数設定（要作成）
+├── test_model.py             # モデル動作確認スクリプト
+├── generate_test_audio.py    # テスト音声生成
+├── test_*.wav                # テスト音声ファイル
+└── README.md                 # このファイル
+```
 
 ## 📝 ライセンス
 
