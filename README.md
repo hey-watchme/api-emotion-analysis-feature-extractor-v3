@@ -241,39 +241,39 @@ superb/
 このプロジェクトで使用しているモデル：
 - wav2vec2-base-superb-er: Apache License 2.0
 
-## 🚨 デプロイ状況と引き継ぎ事項（2025-09-19）
+## 🚨 デプロイ状況と引き継ぎ事項（2025-09-19 更新）
 
-### 現在の状況
+### ✅ デプロイ完了状況
 - ✅ **ECRへのDockerイメージプッシュ完了**
 - ✅ **watchme-server-configs更新完了**
-- ⚠️ **本番デプロイ未完了** - サーバー再起動後の問題あり
+- ✅ **本番環境デプロイ完了** - 正常稼働中
+- ✅ **OpenSMILE APIからの完全移行完了**
+- ✅ **API Managerスケジューラー連携確認済み**
 
-### 本番環境の問題
-EC2サーバー（3.24.16.82）がスケールアップのため再起動され、以下の問題が発生：
-1. watchme-infrastructureサービスが起動失敗
-2. 手動でwatchme-networkは存在確認済み
-3. SUPERB APIコンテナは手動起動で成功
+### 本番環境の現在の状態
+EC2サーバー（3.24.16.82）で正常稼働中：
+1. **SUPERB API**: systemdサービスとして自動起動設定済み（`superb-api.service`）
+2. **OpenSMILE API**: 停止・無効化済み（SUPERB APIに完全置き換え）
+3. **エンドポイント**: `https://api.hey-watch.me/emotion-features/` で動作中
+4. **スケジューラー**: 毎時20分に自動実行（正常動作確認済み）
 
-### 次の作業者への引き継ぎ
+### API利用方法
 
-#### 1. 現在の状態確認
+#### 外部からのアクセス
 ```bash
-ssh -i ~/watchme-key.pem ubuntu@3.24.16.82
-docker ps | grep superb  # コンテナ稼働確認
-docker network ls | grep watchme  # ネットワーク確認
-```
+# API情報
+curl https://api.hey-watch.me/emotion-features/
 
-#### 2. サービスの完全起動手順
-```bash
-# systemdサービスを有効化
-sudo systemctl enable superb-api.service
-sudo systemctl start superb-api.service
-sudo systemctl status superb-api.service
-```
-
-#### 3. 動作確認
-```bash
 # ヘルスチェック
+curl https://api.hey-watch.me/emotion-features/health
+
+# Swagger UI
+open https://api.hey-watch.me/emotion-features/docs
+```
+
+#### 内部からのアクセス
+```bash
+# ローカルホスト経由
 curl http://localhost:8018/health
 
 # テストデータで処理実行
@@ -282,15 +282,47 @@ curl -X POST http://localhost:8018/process/emotion-features \
   -d '{"file_paths": ["files/9f7d6e27-98c3-4c19-bdfb-f7fda58b9a93/2025-09-12/20-30/audio.wav"]}'
 ```
 
-### 重要な情報
-- **ECRリポジトリ**: `754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-api-superb`
-- **ポート**: 8018（OpenSMILE APIの8011を置き換え）
-- **設定ファイル**: `/home/ubuntu/superb/.env`（OpenSMILEからコピー済み）
-- **メモリ制限**: 1.5GB（docker-compose.prod.ymlで設定済み）
+### 運用管理コマンド
 
-### 既知の問題
-1. **感情認識精度**: 叱責音声を「喜び」と誤認識（英語モデルの限界）
-2. **インフラサービス**: 再起動後の自動復旧に問題あり
+#### サービス管理
+```bash
+# 状態確認
+sudo systemctl status superb-api.service
+
+# 再起動
+sudo systemctl restart superb-api.service
+
+# ログ確認
+docker logs superb-api --tail 100 -f
+
+# コンテナ確認
+docker ps | grep superb
+```
+
+#### スケジューラーテスト
+```bash
+# 手動実行（API Managerのスケジューラーから）
+docker exec watchme-scheduler-prod python /app/run-api-process-docker.py emotion-features --date $(date +%Y-%m-%d)
+```
+
+### 重要な設定情報
+- **ECRリポジトリ**: `754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-api-superb`
+- **ポート**: 8018（OpenSMILE APIの8011から完全移行）
+- **コンテナ名**: `superb-api`（スケジューラーから参照）
+- **設定ファイル**: `/home/ubuntu/superb/.env`
+- **メモリ制限**: 1.5GB（docker-compose.prod.ymlで設定済み）
+- **Nginx設定**: `/emotion-features/` → `localhost:8018`に転送
+
+### 既知の問題と対策
+1. **感情認識精度**: 
+   - 問題: 叱責音声を「喜び」と誤認識する場合がある
+   - 原因: wav2vec2-base-superb-erは英語データで訓練されたモデル
+   - 対策: 感情グループ（positive_active, negative_active等）での判断を推奨
+
+2. **Supabaseデータ形式**: 
+   - 現状: `emotion_opensmile`テーブルに保存（OpenSMILE互換）
+   - 違い: `features_timeline`は空、`selected_features_timeline`にSUPERB結果を格納
+   - 今後: 必要に応じてテーブル構造の調整を検討
 
 ## 🤝 貢献
 
