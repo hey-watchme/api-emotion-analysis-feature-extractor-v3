@@ -241,6 +241,57 @@ superb/
 このプロジェクトで使用しているモデル：
 - wav2vec2-base-superb-er: Apache License 2.0
 
+## 🚨 デプロイ状況と引き継ぎ事項（2025-09-19）
+
+### 現在の状況
+- ✅ **ECRへのDockerイメージプッシュ完了**
+- ✅ **watchme-server-configs更新完了**
+- ⚠️ **本番デプロイ未完了** - サーバー再起動後の問題あり
+
+### 本番環境の問題
+EC2サーバー（3.24.16.82）がスケールアップのため再起動され、以下の問題が発生：
+1. watchme-infrastructureサービスが起動失敗
+2. 手動でwatchme-networkは存在確認済み
+3. SUPERB APIコンテナは手動起動で成功
+
+### 次の作業者への引き継ぎ
+
+#### 1. 現在の状態確認
+```bash
+ssh -i ~/watchme-key.pem ubuntu@3.24.16.82
+docker ps | grep superb  # コンテナ稼働確認
+docker network ls | grep watchme  # ネットワーク確認
+```
+
+#### 2. サービスの完全起動手順
+```bash
+# systemdサービスを有効化
+sudo systemctl enable superb-api.service
+sudo systemctl start superb-api.service
+sudo systemctl status superb-api.service
+```
+
+#### 3. 動作確認
+```bash
+# ヘルスチェック
+curl http://localhost:8018/health
+
+# テストデータで処理実行
+curl -X POST http://localhost:8018/process/emotion-features \
+  -H "Content-Type: application/json" \
+  -d '{"file_paths": ["files/9f7d6e27-98c3-4c19-bdfb-f7fda58b9a93/2025-09-12/20-30/audio.wav"]}'
+```
+
+### 重要な情報
+- **ECRリポジトリ**: `754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-api-superb`
+- **ポート**: 8018（OpenSMILE APIの8011を置き換え）
+- **設定ファイル**: `/home/ubuntu/superb/.env`（OpenSMILEからコピー済み）
+- **メモリ制限**: 1.5GB（docker-compose.prod.ymlで設定済み）
+
+### 既知の問題
+1. **感情認識精度**: 叱責音声を「喜び」と誤認識（英語モデルの限界）
+2. **インフラサービス**: 再起動後の自動復旧に問題あり
+
 ## 🤝 貢献
 
 バグ報告や機能リクエストは、Issueを作成してください。

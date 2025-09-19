@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Project specific
+*.wav
+test_*.wav
+result.json
+timeline_output.json
+check_result.py
+
+# Model cache (will be downloaded in container)
+.cache/
+huggingface/
+
+# Logs
+*.log
+
+# Environment variables (will be mounted from host)
+.env
+.env.local
+
+# Documentation
+README.md
+*.md
+
+# Backup files
+main_original.py
+*_backup.*
