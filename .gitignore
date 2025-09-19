@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Virtual Environment
+bin/
+lib/
+lib64/
+include/
+pip-selfcheck.json
+pyvenv.cfg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Project specific
+*.wav
+!test_*.wav
+result.json
+timeline_output.json
+
+# Model cache
+.cache/
+huggingface/
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local
