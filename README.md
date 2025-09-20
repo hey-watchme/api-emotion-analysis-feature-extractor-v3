@@ -241,6 +241,31 @@ superb/
 このプロジェクトで使用しているモデル：
 - wav2vec2-base-superb-er: Apache License 2.0
 
+## 📦 デプロイ手順
+
+### ローカルからのデプロイ
+```bash
+# 1. Dockerイメージをビルド
+docker build -t watchme-api-superb .
+
+# 2. ECRにログイン
+aws ecr get-login-password --region ap-southeast-2 | docker login --username AWS --password-stdin 754724220380.dkr.ecr.ap-southeast-2.amazonaws.com
+
+# 3. イメージにタグ付けしてプッシュ
+docker tag watchme-api-superb:latest 754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-api-superb:latest
+docker push 754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-api-superb:latest
+
+# 4. 本番環境にSSH接続してデプロイ
+ssh -i ~/watchme-key.pem ubuntu@3.24.16.82 "cd /home/ubuntu/api_superb_v1 && \
+  aws ecr get-login-password --region ap-southeast-2 | docker login --username AWS --password-stdin 754724220380.dkr.ecr.ap-southeast-2.amazonaws.com && \
+  docker pull 754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-api-superb:latest && \
+  docker-compose -f docker-compose.prod.yml down && \
+  docker-compose -f docker-compose.prod.yml up -d"
+
+# 5. デプロイ確認
+curl https://api.hey-watch.me/emotion-features/health
+```
+
 ## 🚨 デプロイ状況と引き継ぎ事項（2025-09-19 更新）
 
 ### ✅ デプロイ完了状況
@@ -249,13 +274,22 @@ superb/
 - ✅ **本番環境デプロイ完了** - 正常稼働中
 - ✅ **OpenSMILE APIからの完全移行完了**
 - ✅ **API Managerスケジューラー連携確認済み**
+- ✅ **ポート修正完了（2025-09-19）** - 正しいポート8018で稼働中
 
 ### 本番環境の現在の状態
 EC2サーバー（3.24.16.82）で正常稼働中：
-1. **SUPERB API**: systemdサービスとして自動起動設定済み（`superb-api.service`）
+1. **SUPERB API**: docker-composeで管理、ポート8018で稼働
 2. **OpenSMILE API**: 停止・無効化済み（SUPERB APIに完全置き換え）
 3. **エンドポイント**: `https://api.hey-watch.me/emotion-features/` で動作中
 4. **スケジューラー**: 毎時20分に自動実行（正常動作確認済み）
+
+### ⚠️ 重要：ポート割り当て（2025-09-19 修正済み）
+| API | 正しいポート | 用途 | Nginxパス |
+|-----|------------|------|----------|
+| **SUPERB API** | **8018** | 感情認識（OpenSMILE代替） | /emotion-features/ |
+| **AST API** | **8017** | 音響イベント検出（SED代替） | /behavior-features/ |
+
+**注意**: AST APIとSUPERB APIのポートを間違えないよう注意。SUPERB APIは必ず8018で動作させること。
 
 ### API利用方法
 
@@ -284,6 +318,12 @@ curl -X POST http://localhost:8018/process/emotion-features \
 
 ### 運用管理コマンド
 
+#### SSH接続
+```bash
+# 本番環境へのSSH接続
+ssh -i ~/watchme-key.pem ubuntu@3.24.16.82
+```
+
 #### サービス管理
 ```bash
 # 状態確認
@@ -309,7 +349,8 @@ docker exec watchme-scheduler-prod python /app/run-api-process-docker.py emotion
 - **ECRリポジトリ**: `754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-api-superb`
 - **ポート**: 8018（OpenSMILE APIの8011から完全移行）
 - **コンテナ名**: `superb-api`（スケジューラーから参照）
-- **設定ファイル**: `/home/ubuntu/superb/.env`
+- **設定ファイル**: `/home/ubuntu/api_superb_v1/.env`
+- **docker-compose**: `/home/ubuntu/api_superb_v1/docker-compose.prod.yml`
 - **メモリ制限**: 1.5GB（docker-compose.prod.ymlで設定済み）
 - **Nginx設定**: `/emotion-features/` → `localhost:8018`に転送
 

@@ -365,16 +365,16 @@ async def process_emotion_features(request: EmotionFeaturesRequest):
                     processed_files += 1
                     
                     # Supabase用のレコードを準備
-                    # features_timelineは空配列（OpenSMILEとの互換性のため）
-                    # selected_features_timelineにSUPERBの結果を保存
+                    # features_timelineにSUPERBの結果を保存（修正版）
+                    # selected_features_timelineは空配列（互換性のため）
                     supabase_record = {
                         "device_id": device_id,
                         "date": date,
                         "time_block": time_block,
                         "filename": os.path.basename(file_path),
                         "duration_seconds": duration_seconds,
-                        "features_timeline": [],  # OpenSMILEの特徴量（空）
-                        "selected_features_timeline": chunks_results,  # SUPERBの感情分析結果
+                        "features_timeline": chunks_results,  # SUPERBの感情分析結果をこちらに保存
+                        "selected_features_timeline": [],  # 空配列を設定
                         "processing_time": processing_time,
                         "error": None
                     }
@@ -404,8 +404,8 @@ async def process_emotion_features(request: EmotionFeaturesRequest):
                             "time_block": path_info['time_block'],
                             "filename": os.path.basename(file_path),
                             "duration_seconds": 0,
-                            "features_timeline": [],
-                            "selected_features_timeline": [],
+                            "features_timeline": [],  # エラー時は空
+                            "selected_features_timeline": [],  # エラー時は空
                             "processing_time": 0,
                             "error": str(e)
                         }
@@ -438,10 +438,10 @@ async def process_emotion_features(request: EmotionFeaturesRequest):
                             time_block=record["time_block"],
                             filename=record["filename"],
                             duration_seconds=record["duration_seconds"],
-                            features_timeline=record["features_timeline"],
+                            features_timeline=record["features_timeline"],  # SUPERBの結果がここに入る
                             processing_time=record["processing_time"],
                             error=record.get("error"),
-                            selected_features_timeline=record.get("selected_features_timeline")
+                            selected_features_timeline=record.get("selected_features_timeline", [])  # 空配列
                         )
                         saved_count += 1
                     except Exception as individual_error:
