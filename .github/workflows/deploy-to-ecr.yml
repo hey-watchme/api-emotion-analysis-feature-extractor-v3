@@ -115,7 +115,17 @@ jobs:
         mkdir -p ~/.ssh
         ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
 
-    # ステップ4: docker-compose.prod.ymlとrun-prod.shをEC2にコピー（重要！）
+    # ステップ4: EC2にディレクトリを作成（べき等性のため）
+    - name: Create application directory on EC2 if not exists
+      env:
+        EC2_HOST: ${{ secrets.EC2_HOST }}
+        EC2_USER: ${{ secrets.EC2_USER }}
+      run: |
+        echo "📁 Creating application directory on EC2..."
+        ssh ${EC2_USER}@${EC2_HOST} "mkdir -p /home/ubuntu/emotion-analysis-feature-extractor-v3"
+        echo "✅ Directory created/verified"
+
+    # ステップ5: docker-compose.prod.ymlとrun-prod.shをEC2にコピー（重要！）
     - name: Update configuration files on EC2
       env:
         EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -127,11 +137,13 @@ jobs:
         ssh ${EC2_USER}@${EC2_HOST} "chmod +x /home/ubuntu/emotion-analysis-feature-extractor-v3/run-prod.sh"
         echo "✅ Configuration files updated"
 
-    # ステップ5: 環境変数ファイルの作成/更新
+    # ステップ6: 環境変数ファイルの作成/更新
     - name: Create/Update .env file on EC2
       env:
         EC2_HOST: ${{ secrets.EC2_HOST }}
         EC2_USER: ${{ secrets.EC2_USER }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
         SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
       run: |
@@ -141,14 +153,16 @@ jobs:
         # 重要: echoコマンドで確実に環境変数を渡す（推奨方法）
         ssh ${EC2_USER}@${EC2_HOST} << ENDSSH
           cd /home/ubuntu/emotion-analysis-feature-extractor-v3
-          echo "SUPABASE_URL=${SUPABASE_URL}" > .env
+          echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}" > .env
+          echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}" >> .env
+          echo "SUPABASE_URL=${SUPABASE_URL}" >> .env
           echo "SUPABASE_KEY=${SUPABASE_KEY}" >> .env
         ENDSSH
 
         # 作成確認
         ssh ${EC2_USER}@${EC2_HOST} "echo '✅ .env file created/updated successfully' && wc -l /home/ubuntu/emotion-analysis-feature-extractor-v3/.env"
 
-    # ステップ6: EC2にデプロイ
+    # ステップ7: EC2にデプロイ
     - name: Deploy to EC2 instance
       env:
         EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -186,7 +200,7 @@ jobs:
 
         echo "✅ EC2 deployment completed successfully!"
 
-    # ステップ7: デプロイ成功通知
+    # ステップ8: デプロイ成功通知
     - name: Deployment Success Notification
       if: success()
       run: |
@@ -195,7 +209,7 @@ jobs:
         echo "🌐 URL: https://api.hey-watch.me/emotion-features/"
         echo "🏷️ Version: ${{ github.sha }}"
 
-    # ステップ8: デプロイ失敗通知
+    # ステップ9: デプロイ失敗通知
     - name: Deployment Failure Notification
       if: failure()
       run: |
