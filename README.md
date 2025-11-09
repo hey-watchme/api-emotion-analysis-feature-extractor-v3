@@ -9,7 +9,10 @@ wav2vec2-base-superb-erモデルを使用した音声感情分析APIサービス
 ### 主な特徴
 - **OpenSMILE API互換**: 同じエンドポイント、同じデータ構造
 - **S3統合**: AWS S3から音声ファイルを自動取得
-- **Supabase連携**: `emotion_opensmile`テーブルに結果を保存
+- **Supabase連携**: `audio_features`テーブルに結果を保存
+  - `emotion_extractor_result`: JSONB形式で感情分析結果
+  - `emotion_extractor_status`: 処理ステータス
+  - `emotion_extractor_processed_at`: 処理完了時刻
 - **30秒チャンク処理**: メモリ効率的な分割処理
 - **8感情分析**: wav2vec2-base-superb-erによる詳細な感情検出
 
@@ -70,7 +73,7 @@ SUPABASE_KEY=your_supabase_key
 AWS_ACCESS_KEY_ID=your_aws_access_key_id
 AWS_SECRET_ACCESS_KEY=your_aws_secret_access_key
 S3_BUCKET_NAME=your_s3_bucket_name
-AWS_REGION=us-east-1
+AWS_REGION=ap-southeast-2
 ```
 
 ### 4. APIサーバーの起動
@@ -122,23 +125,24 @@ API情報の取得
 
 ## 💾 データベース構造
 
-### emotion_opensmileテーブル
+### audio_featuresテーブル（新スキーマ）
 ```sql
-create table public.emotion_opensmile (
+create table public.audio_features (
   device_id text not null,
   date date not null,
   time_block text not null,
-  filename text,
-  duration_seconds integer,
-  features_timeline jsonb,  -- OpenSMILE特徴量（SUPERBでは空）
-  selected_features_timeline jsonb,  -- SUPERB感情分析結果
-  processing_time double precision,
-  error text,
-  status text default 'pending'
+
+  -- Emotion Features (SUPERB) の結果
+  emotion_extractor_result jsonb,  -- 感情分析結果（8感情×チャンク数）
+  emotion_extractor_status text,  -- 'completed' | 'failed'
+  emotion_extractor_processed_at timestamp with time zone,
+  emotion_extractor_error_message text,
+
+  primary key (device_id, date, time_block)
 );
 ```
 
-### selected_features_timelineの構造
+### emotion_extractor_resultの構造
 ```json
 [
   {
@@ -360,10 +364,10 @@ docker exec watchme-scheduler-prod python /app/run-api-process-docker.py emotion
    - 原因: wav2vec2-base-superb-erは英語データで訓練されたモデル
    - 対策: 感情グループ（positive_active, negative_active等）での判断を推奨
 
-2. **Supabaseデータ形式**: 
-   - 現状: `emotion_opensmile`テーブルに保存（OpenSMILE互換）
-   - 違い: `features_timeline`は空、`selected_features_timeline`にSUPERB結果を格納
-   - 今後: 必要に応じてテーブル構造の調整を検討
+2. **Supabaseデータ形式**:
+   - 新スキーマ: `audio_features`テーブルに保存（統一スキーマ）
+   - カラム: `emotion_extractor_result`にSUPERB結果を格納（JSONB形式）
+   - ステータス: `emotion_extractor_status`で処理状況を管理
 
 ## 🤝 貢献
 
