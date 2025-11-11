@@ -1,6 +1,6 @@
 """
 Supabaseサービスレイヤー
-audio_featuresテーブルへのデータ保存を管理
+spot_featuresテーブルへのデータ保存を管理
 """
 
 import json
@@ -14,33 +14,23 @@ class SupabaseService:
 
     def __init__(self, supabase_client: Client):
         self.supabase = supabase_client
-        self.table_name = "audio_features"
+        self.table_name = "spot_features"
     
     async def upsert_emotion_data(
         self,
         device_id: str,
-        date: str,
-        time_block: str,
-        filename: str,
-        duration_seconds: int,
+        recorded_at: str,
         features_timeline: List[Dict],
-        processing_time: float,
-        error: Optional[str] = None,
-        selected_features_timeline: Optional[List[Dict]] = None
+        error: Optional[str] = None
     ) -> Dict:
         """
-        audio_featuresテーブルに感情データをUPSERT
+        spot_featuresテーブルに感情データをUPSERT
 
         Args:
             device_id: デバイスID
-            date: 日付 (YYYY-MM-DD形式)
-            time_block: 時間ブロック (HH-MM形式)
-            filename: 処理したファイル名（旧パラメータ、互換性のため保持）
-            duration_seconds: 音声の長さ（旧パラメータ、互換性のため保持）
+            recorded_at: 録音日時 (UTC timestamp)
             features_timeline: SUPERBの感情分析結果
-            processing_time: 処理時間（旧パラメータ、互換性のため保持）
             error: エラーメッセージ（あれば）
-            selected_features_timeline: 旧パラメータ（互換性のため保持）
 
         Returns:
             Dict: Supabaseからのレスポンス
@@ -49,11 +39,10 @@ class SupabaseService:
             # 現在のUTCタイムスタンプを取得
             processed_at = datetime.now(timezone.utc).isoformat()
 
-            # データの準備（新しいスキーマに対応）
+            # データの準備
             data = {
                 "device_id": device_id,
-                "date": date,
-                "time_block": time_block,
+                "recorded_at": recorded_at,
                 "emotion_extractor_result": features_timeline,  # JSONB形式
                 "emotion_extractor_status": "completed" if not error else "failed",
                 "emotion_extractor_processed_at": processed_at
@@ -63,17 +52,14 @@ class SupabaseService:
             if error:
                 data["emotion_extractor_error_message"] = error
 
-            # UPSERT実行（プライマリキー: device_id, date, time_block）
-            response = self.supabase.table(self.table_name).upsert(
-                data,
-                on_conflict="device_id,date,time_block"
-            ).execute()
+            # UPSERT実行（プライマリキー: device_id, recorded_at）
+            response = self.supabase.table(self.table_name).upsert(data).execute()
 
-            print(f"✅ audio_features UPSERT成功: {device_id}/{date}/{time_block}")
+            print(f"✅ spot_features UPSERT成功: {device_id}/{recorded_at}")
             return response.data
 
         except Exception as e:
-            print(f"❌ audio_features UPSERT失敗: {str(e)}")
+            print(f"❌ spot_features UPSERT失敗: {str(e)}")
             raise e
     
     async def batch_upsert_emotion_data(
@@ -81,10 +67,11 @@ class SupabaseService:
         records: List[Dict]
     ) -> List[Dict]:
         """
-        複数のレコードを一度にUPSERT（新スキーマ対応）
+        複数のレコードを一度にUPSERT
 
         Args:
             records: UPSERTするレコードのリスト
+                    各レコードには device_id, recorded_at, features_timeline が必要
 
         Returns:
             List[Dict]: Supabaseからのレスポンス
@@ -98,8 +85,7 @@ class SupabaseService:
             for record in records:
                 new_record = {
                     "device_id": record["device_id"],
-                    "date": record["date"],
-                    "time_block": record["time_block"],
+                    "recorded_at": record["recorded_at"],
                     "emotion_extractor_result": record.get("features_timeline", []),  # JSONB形式
                     "emotion_extractor_status": "completed" if not record.get("error") else "failed",
                     "emotion_extractor_processed_at": processed_at
@@ -111,14 +97,11 @@ class SupabaseService:
 
                 converted_records.append(new_record)
 
-            response = self.supabase.table(self.table_name).upsert(
-                converted_records,
-                on_conflict="device_id,date,time_block"
-            ).execute()
+            response = self.supabase.table(self.table_name).upsert(converted_records).execute()
 
-            print(f"✅ audio_features バッチUPSERT成功: {len(converted_records)}件")
+            print(f"✅ spot_features バッチUPSERT成功: {len(converted_records)}件")
             return response.data
 
         except Exception as e:
-            print(f"❌ audio_features バッチUPSERT失敗: {str(e)}")
+            print(f"❌ spot_features バッチUPSERT失敗: {str(e)}")
             raise e
