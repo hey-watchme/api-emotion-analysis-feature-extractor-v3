@@ -333,15 +333,24 @@ async def process_emotion_features(request: EmotionFeaturesRequest):
             for file_path in request.file_paths:
                 try:
                     print(f"\n📥 S3からファイル取得開始: {file_path}")
-                    
-                    # ファイルパスから情報を抽出
-                    path_info = extract_info_from_file_path(file_path)
-                    device_id = path_info['device_id']
-                    date = path_info['date']
-                    time_block = path_info['time_block']
-                    
+
+                    # audio_filesテーブルからrecorded_atを取得
+                    audio_file_response = supabase.table('audio_files') \
+                        .select('device_id, recorded_at') \
+                        .eq('file_path', file_path) \
+                        .single() \
+                        .execute()
+
+                    if not audio_file_response.data:
+                        print(f"❌ audio_files record not found: {file_path}")
+                        error_files.append(file_path)
+                        continue
+
+                    device_id = audio_file_response.data['device_id']
+                    recorded_at = audio_file_response.data['recorded_at']
+
                     # S3から一時ファイルにダウンロード
-                    temp_file_path = os.path.join(temp_dir, f"{time_block}.wav")
+                    temp_file_path = os.path.join(temp_dir, f"{recorded_at.replace(':', '-')}.wav")
                     
                     try:
                         s3_client.download_file(s3_bucket_name, file_path, temp_file_path)
@@ -365,17 +374,10 @@ async def process_emotion_features(request: EmotionFeaturesRequest):
                     processed_files += 1
                     
                     # Supabase用のレコードを準備
-                    # features_timelineにSUPERBの結果を保存（修正版）
-                    # selected_features_timelineは空配列（互換性のため）
                     supabase_record = {
                         "device_id": device_id,
-                        "date": date,
-                        "time_block": time_block,
-                        "filename": os.path.basename(file_path),
-                        "duration_seconds": duration_seconds,
-                        "features_timeline": chunks_results,  # SUPERBの感情分析結果をこちらに保存
-                        "selected_features_timeline": [],  # 空配列を設定
-                        "processing_time": processing_time,
+                        "recorded_at": recorded_at,
+                        "features_timeline": chunks_results,  # SUPERBの感情分析結果
                         "error": None
                     }
                     supabase_records.append(supabase_record)
@@ -397,19 +399,21 @@ async def process_emotion_features(request: EmotionFeaturesRequest):
                     
                     # エラーレコードもSupabaseに保存
                     try:
-                        path_info = extract_info_from_file_path(file_path)
-                        supabase_record = {
-                            "device_id": path_info['device_id'],
-                            "date": path_info['date'],
-                            "time_block": path_info['time_block'],
-                            "filename": os.path.basename(file_path),
-                            "duration_seconds": 0,
-                            "features_timeline": [],  # エラー時は空
-                            "selected_features_timeline": [],  # エラー時は空
-                            "processing_time": 0,
-                            "error": str(e)
-                        }
-                        supabase_records.append(supabase_record)
+                        # audio_filesからrecorded_atを取得
+                        error_response = supabase.table('audio_files') \
+                            .select('device_id, recorded_at') \
+                            .eq('file_path', file_path) \
+                            .single() \
+                            .execute()
+
+                        if error_response.data:
+                            supabase_record = {
+                                "device_id": error_response.data['device_id'],
+                                "recorded_at": error_response.data['recorded_at'],
+                                "features_timeline": [],  # エラー時は空
+                                "error": str(e)
+                            }
+                            supabase_records.append(supabase_record)
                     except:
                         pass
         
@@ -434,19 +438,14 @@ async def process_emotion_features(request: EmotionFeaturesRequest):
                     try:
                         await supabase_service.upsert_emotion_data(
                             device_id=record["device_id"],
-                            date=record["date"],
-                            time_block=record["time_block"],
-                            filename=record["filename"],
-                            duration_seconds=record["duration_seconds"],
-                            features_timeline=record["features_timeline"],  # SUPERBの結果がここに入る
-                            processing_time=record["processing_time"],
-                            error=record.get("error"),
-                            selected_features_timeline=record.get("selected_features_timeline", [])  # 空配列
+                            recorded_at=record["recorded_at"],
+                            features_timeline=record["features_timeline"],
+                            error=record.get("error")
                         )
                         saved_count += 1
                     except Exception as individual_error:
-                        save_errors.append(f"{record['time_block']}: {str(individual_error)}")
-                        print(f"❌ 個別保存エラー: {record['time_block']} - {str(individual_error)}")
+                        save_errors.append(f"{record['recorded_at']}: {str(individual_error)}")
+                        print(f"❌ 個別保存エラー: {record['recorded_at']} - {str(individual_error)}")
         
         # レスポンス作成
         total_time = time.time() - start_time
