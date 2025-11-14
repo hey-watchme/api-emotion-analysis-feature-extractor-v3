@@ -21,6 +21,7 @@ class SupabaseService:
         device_id: str,
         recorded_at: str,
         features_timeline: List[Dict],
+        local_date: Optional[str] = None,
         error: Optional[str] = None
     ) -> Dict:
         """
@@ -30,6 +31,7 @@ class SupabaseService:
             device_id: デバイスID
             recorded_at: 録音日時 (UTC timestamp)
             features_timeline: SUPERBの感情分析結果
+            local_date: ローカル日付 (YYYY-MM-DD)
             error: エラーメッセージ（あれば）
 
         Returns:
@@ -47,6 +49,10 @@ class SupabaseService:
                 "emotion_extractor_status": "completed" if not error else "failed",
                 "emotion_extractor_processed_at": processed_at
             }
+
+            # local_dateがあれば追加
+            if local_date:
+                data["local_date"] = local_date
 
             # エラーメッセージがあれば追加
             if error:
@@ -90,6 +96,10 @@ class SupabaseService:
                     "emotion_extractor_status": "completed" if not record.get("error") else "failed",
                     "emotion_extractor_processed_at": processed_at
                 }
+
+                # local_dateがあれば追加
+                if record.get("local_date"):
+                    new_record["local_date"] = record["local_date"]
 
                 # エラーメッセージがあれば追加
                 if record.get("error"):
