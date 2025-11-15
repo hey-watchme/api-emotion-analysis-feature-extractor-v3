@@ -334,9 +334,9 @@ async def process_emotion_features(request: EmotionFeaturesRequest):
                 try:
                     print(f"\n📥 S3からファイル取得開始: {file_path}")
 
-                    # audio_filesテーブルからrecorded_atとlocal_dateを取得
+                    # audio_filesテーブルからrecorded_at, local_date, local_timeを取得
                     audio_file_response = supabase_client.table('audio_files') \
-                        .select('device_id, recorded_at, local_date') \
+                        .select('device_id, recorded_at, local_date, local_time') \
                         .eq('file_path', file_path) \
                         .single() \
                         .execute()
@@ -349,6 +349,7 @@ async def process_emotion_features(request: EmotionFeaturesRequest):
                     device_id = audio_file_response.data['device_id']
                     recorded_at = audio_file_response.data['recorded_at']
                     local_date = audio_file_response.data.get('local_date')
+                    local_time = audio_file_response.data.get('local_time')
 
                     # S3から一時ファイルにダウンロード
                     temp_file_path = os.path.join(temp_dir, f"{recorded_at.replace(':', '-')}.wav")
@@ -379,6 +380,7 @@ async def process_emotion_features(request: EmotionFeaturesRequest):
                         "device_id": device_id,
                         "recorded_at": recorded_at,
                         "local_date": local_date,
+                        "local_time": local_time,
                         "features_timeline": chunks_results,  # SUPERBの感情分析結果
                         "error": None
                     }
@@ -401,9 +403,9 @@ async def process_emotion_features(request: EmotionFeaturesRequest):
                     
                     # エラーレコードもSupabaseに保存
                     try:
-                        # audio_filesからrecorded_atとlocal_dateを取得
+                        # audio_filesからrecorded_at, local_date, local_timeを取得
                         error_response = supabase_client.table('audio_files') \
-                            .select('device_id, recorded_at, local_date') \
+                            .select('device_id, recorded_at, local_date, local_time') \
                             .eq('file_path', file_path) \
                             .single() \
                             .execute()
@@ -413,6 +415,7 @@ async def process_emotion_features(request: EmotionFeaturesRequest):
                                 "device_id": error_response.data['device_id'],
                                 "recorded_at": error_response.data['recorded_at'],
                                 "local_date": error_response.data.get('local_date'),
+                                "local_time": error_response.data.get('local_time'),
                                 "features_timeline": [],  # エラー時は空
                                 "error": str(e)
                             }
@@ -444,6 +447,7 @@ async def process_emotion_features(request: EmotionFeaturesRequest):
                             recorded_at=record["recorded_at"],
                             features_timeline=record["features_timeline"],
                             local_date=record.get("local_date"),
+                            local_time=record.get("local_time"),
                             error=record.get("error")
                         )
                         saved_count += 1
