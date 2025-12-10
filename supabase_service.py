@@ -22,6 +22,7 @@ class SupabaseService:
         recorded_at: str,
         features_timeline: List[Dict],
         local_date: Optional[str] = None,
+        local_time: Optional[str] = None,
         error: Optional[str] = None
     ) -> Dict:
         """
@@ -32,6 +33,7 @@ class SupabaseService:
             recorded_at: 録音日時 (UTC timestamp)
             features_timeline: SUPERBの感情分析結果
             local_date: ローカル日付 (YYYY-MM-DD)
+            local_time: ローカル時刻 (YYYY-MM-DD HH:MM:SS)
             error: エラーメッセージ（あれば）
 
         Returns:
@@ -53,6 +55,10 @@ class SupabaseService:
             # local_dateがあれば追加
             if local_date:
                 data["local_date"] = local_date
+
+            # local_timeがあれば追加
+            if local_time:
+                data["local_time"] = local_time
 
             # エラーメッセージがあれば追加
             if error:
@@ -101,6 +107,10 @@ class SupabaseService:
                 if record.get("local_date"):
                     new_record["local_date"] = record["local_date"]
 
+                # local_timeがあれば追加
+                if record.get("local_time"):
+                    new_record["local_time"] = record["local_time"]
+
                 # エラーメッセージがあれば追加
                 if record.get("error"):
                     new_record["emotion_extractor_error_message"] = record["error"]
@@ -115,3 +125,36 @@ class SupabaseService:
         except Exception as e:
             print(f"❌ spot_features バッチUPSERT失敗: {str(e)}")
             raise e
+
+    async def update_status(self, device_id: str, recorded_at: str, status_field: str, status_value: str):
+        """
+        Update processing status in spot_features table
+        """
+        try:
+            # Update status in database
+            response = self.supabase.table('spot_features').update({
+                status_field: status_value,
+                'updated_at': datetime.utcnow().isoformat()
+            }).eq(
+                'device_id', device_id
+            ).eq(
+                'recorded_at', recorded_at
+            ).execute()
+
+            if response.data:
+                print(f"Status updated: {device_id}/{recorded_at} - {status_field}={status_value}")
+            else:
+                # If no existing record, create one
+                insert_data = {
+                    'device_id': device_id,
+                    'recorded_at': recorded_at,
+                    status_field: status_value,
+                    'created_at': datetime.utcnow().isoformat(),
+                    'updated_at': datetime.utcnow().isoformat()
+                }
+                self.supabase.table('spot_features').insert(insert_data).execute()
+                print(f"Status record created: {device_id}/{recorded_at} - {status_field}={status_value}")
+
+        except Exception as e:
+            print(f"Failed to update status: {str(e)}")
+            raise
