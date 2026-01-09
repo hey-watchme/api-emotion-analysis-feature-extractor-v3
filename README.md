@@ -185,23 +185,45 @@ docker logs emotion-analysis-hume -f
 - `SUPABASE_URL`: SupabaseプロジェクトURL
 - `SUPABASE_KEY`: Supabase Service Role Key
 
+## 実装状況（2026-01-09）
+
+### ✅ 完了
+- Hume AI v3実装完了（Speech Prosody + Vocal Burst + Language）
+- v2完全置き換え（同ECR/ポート/コンテナ名）
+- GitHub Actions CI/CD設定
+- EC2デプロイ成功
+- Supabase `emotion_features_result_hume` カラム追加完了
+
+### ⚠️ 修正済み問題
+1. **Hume API認証**: Basic認証→`X-Hume-Api-Key`ヘッダーに修正
+2. **Supabase**: `updated_at`/`id`カラム参照を削除
+3. **環境変数**: 手動で`.env`修正（GitHub Actions変数渡しに問題）
+
+### 🧪 テスト状況
+- ヘルスチェック: ✅ `status: healthy`
+- `/async-process`: ✅ 202 Accepted返却
+- **次回デプロイ後に実音声でテスト必要**
+
+### 💰 コスト
+- **$0.0639/分**（Audio: Prosody+Burst+Language+Transcription）
+- 1デバイス（48分/日）: **$92.1/月**
+- フリープラン制限は要確認
+
 ## トラブルシューティング
 
-### 低品質音声の場合
-
-Hume APIは低品質音声を処理できません。この場合:
-- エラーとして記録
-- `emotion_features_result_hume` に error フラグを保存
-- 欠損データとして扱う
-
-### ヘルスチェックエラー
-
+### 環境変数が読み込まれない
 ```bash
-# EC2でコンテナ状態確認
-docker ps | grep emotion-analysis-hume
+ssh ubuntu@3.24.16.82
+cd /home/ubuntu/emotion-analysis-feature-extractor
+cat .env  # 内容確認
+docker-compose -f docker-compose.prod.yml down
+docker-compose -f docker-compose.prod.yml up -d
+```
 
-# ログ確認
-docker logs emotion-analysis-hume --tail 100
+### ヘルスチェック
+```bash
+curl http://localhost:8018/health
+docker logs emotion-analysis-feature-extractor --tail 100
 ```
 
 ## 関連ドキュメント
