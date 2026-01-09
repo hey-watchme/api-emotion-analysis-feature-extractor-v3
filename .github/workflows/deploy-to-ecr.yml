@@ -1,36 +1,18 @@
-name: Deploy to ECR
+# Hume AI Emotion Recognition API - ECR & EC2 Auto Deploy
+name: Deploy to Amazon ECR and EC2
 
 on:
   push:
-    branches:
-      - main
+    branches: [ "main" ]
+  workflow_dispatch:
 
 env:
   AWS_REGION: ap-southeast-2
   ECR_REPOSITORY: watchme-emotion-analysis-hume
-  EC2_HOST: 3.24.16.82
-  EC2_USER: ubuntu
-  SERVICE_NAME: emotion-analysis-hume
-  SERVICE_PORT: 8019
-
-  # Secrets from GitHub
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-
-  # Hume API
-  HUME_API_KEY: ${{ secrets.HUME_API_KEY }}
-  HUME_SECRET_KEY: ${{ secrets.HUME_SECRET_KEY }}
-
-  # Supabase
-  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-  SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-
-  # SQS
-  FEATURE_COMPLETED_QUEUE_URL: ${{ secrets.FEATURE_COMPLETED_QUEUE_URL }}
 
 jobs:
   deploy:
+    name: Build and Push to ECR
     runs-on: ubuntu-latest
 
     steps:
@@ -48,79 +30,169 @@ jobs:
       id: login-ecr
       uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Build and push Docker image
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Delete old images from ECR
+      run: |
+        echo "🗑️ Deleting old 'latest' tag from ECR..."
+        aws ecr batch-delete-image \
+          --region ${{ env.AWS_REGION }} \
+          --repository-name ${{ env.ECR_REPOSITORY }} \
+          --image-ids imageTag=latest 2>&1 || echo "No existing 'latest' tag found"
+        echo "✅ Old image deleted from ECR"
+
+    - name: Build, tag, and push image to Amazon ECR
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ github.sha }}
       run: |
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-        echo "Image pushed to $ECR_REGISTRY/$ECR_REPOSITORY:latest"
+        docker buildx build \
+          --platform linux/arm64 \
+          --no-cache \
+          --push \
+          -f Dockerfile \
+          -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG \
+          -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest \
+          .
 
-    - name: Deploy to EC2
+        echo "✅ Image pushed to ECR:"
+        echo "  - $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG"
+        echo "  - $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest"
+
+    - name: Deploy Success Notification
+      if: success()
+      run: |
+        echo "🎉 Deployment to ECR succeeded!"
+        echo "📦 Repository: ${{ env.ECR_REPOSITORY }}"
+        echo "🏷️ Image Tag: ${{ github.sha }}"
+        echo "📍 Region: ${{ env.AWS_REGION }}"
+        echo ""
+        echo "📋 Next Steps:"
+        echo "1. SSH to EC2: ssh -i ~/watchme-key.pem ubuntu@3.24.16.82"
+        echo "2. Deploy: cd /home/ubuntu/emotion-analysis-hume && ./run-prod.sh"
+
+    - name: Deploy Failure Notification
+      if: failure()
+      run: |
+        echo "❌ Deployment to ECR failed!"
+        echo "Please check the logs above for details."
+
+  deploy-to-ec2:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    needs: deploy
+
+    steps:
+    - name: Setup SSH Agent
+      uses: webfactory/ssh-agent@v0.9.0
+      with:
+        ssh-private-key: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Add EC2 to known hosts
+      run: |
+        mkdir -p ~/.ssh
+        ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+    - name: Create application directory on EC2
       env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        EC2_HOST: ${{ secrets.EC2_HOST }}
+        EC2_USER: ${{ secrets.EC2_USER }}
       run: |
-        # Setup SSH
-        echo "${{ secrets.EC2_SSH_KEY }}" > ec2_key.pem
-        chmod 600 ec2_key.pem
+        echo "📁 Creating application directory on EC2..."
+        ssh ${EC2_USER}@${EC2_HOST} "mkdir -p /home/ubuntu/emotion-analysis-hume"
+        echo "✅ Directory created/verified"
 
-        # Create deployment directory on EC2
-        ssh -o StrictHostKeyChecking=no -i ec2_key.pem ${EC2_USER}@${EC2_HOST} << 'ENDSSH'
-          mkdir -p /home/ubuntu/${SERVICE_NAME}
-        ENDSSH
-
-        # Copy docker-compose file
-        scp -o StrictHostKeyChecking=no -i ec2_key.pem \
-          docker-compose.prod.yml \
-          ${EC2_USER}@${EC2_HOST}:/home/ubuntu/${SERVICE_NAME}/docker-compose.yml
-
-        # Create .env file and deploy
-        ssh -o StrictHostKeyChecking=no -i ec2_key.pem ${EC2_USER}@${EC2_HOST} << ENDSSH
-          cd /home/ubuntu/${SERVICE_NAME}
-
-          # Create .env file with secrets
-          cat > .env << 'EOF'
-HUME_API_KEY=${HUME_API_KEY}
-HUME_SECRET_KEY=${HUME_SECRET_KEY}
-AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-AWS_REGION=${AWS_REGION}
-S3_BUCKET_NAME=watchme-vault
-SUPABASE_URL=${SUPABASE_URL}
-SUPABASE_KEY=${SUPABASE_KEY}
-FEATURE_COMPLETED_QUEUE_URL=${FEATURE_COMPLETED_QUEUE_URL}
-HUME_POLL_INTERVAL=3
-HUME_MAX_POLL_ATTEMPTS=40
-HUME_CONFIDENCE_THRESHOLD=0.5
-EOF
-
-          # Login to ECR from EC2
-          aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
-
-          # Stop existing container
-          docker-compose down || true
-
-          # Pull latest image
-          docker pull ${ECR_REGISTRY}/${ECR_REPOSITORY}:latest
-
-          # Start new container
-          docker-compose up -d
-
-          # Check if container is running
-          sleep 10
-          docker ps | grep ${SERVICE_NAME}
-
-          # Check health endpoint
-          curl -f http://localhost:${SERVICE_PORT}/health || exit 1
-
-          echo "Deployment successful!"
-        ENDSSH
-
-        # Cleanup
-        rm -f ec2_key.pem
-
-    - name: Verify deployment
+    - name: Update configuration files on EC2
+      env:
+        EC2_HOST: ${{ secrets.EC2_HOST }}
+        EC2_USER: ${{ secrets.EC2_USER }}
       run: |
-        sleep 5
-        echo "Checking service health..."
-        curl -f https://api.hey-watch.me/emotion-analysis/hume/health || echo "Warning: Health check failed. Please check manually."
+        echo "📦 Updating configuration files on EC2..."
+        scp -o StrictHostKeyChecking=no docker-compose.prod.yml ${EC2_USER}@${EC2_HOST}:/home/ubuntu/emotion-analysis-hume/
+        scp -o StrictHostKeyChecking=no run-prod.sh ${EC2_USER}@${EC2_HOST}:/home/ubuntu/emotion-analysis-hume/
+        ssh ${EC2_USER}@${EC2_HOST} "chmod +x /home/ubuntu/emotion-analysis-hume/run-prod.sh"
+        echo "✅ Configuration files updated"
+
+    - name: Create/Update .env file on EC2
+      env:
+        EC2_HOST: ${{ secrets.EC2_HOST }}
+        EC2_USER: ${{ secrets.EC2_USER }}
+        HUME_API_KEY: ${{ secrets.HUME_API_KEY }}
+        HUME_SECRET_KEY: ${{ secrets.HUME_SECRET_KEY }}
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+        SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        FEATURE_COMPLETED_QUEUE_URL: ${{ secrets.FEATURE_COMPLETED_QUEUE_URL }}
+      run: |
+        echo "📝 Creating/Updating .env file on EC2..."
+        ssh ${EC2_USER}@${EC2_HOST} << ENDSSH
+          cd /home/ubuntu/emotion-analysis-hume
+          echo "HUME_API_KEY=${HUME_API_KEY}" > .env
+          echo "HUME_SECRET_KEY=${HUME_SECRET_KEY}" >> .env
+          echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}" >> .env
+          echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}" >> .env
+          echo "AWS_REGION=ap-southeast-2" >> .env
+          echo "S3_BUCKET_NAME=watchme-vault" >> .env
+          echo "SUPABASE_URL=${SUPABASE_URL}" >> .env
+          echo "SUPABASE_KEY=${SUPABASE_KEY}" >> .env
+          echo "FEATURE_COMPLETED_QUEUE_URL=${FEATURE_COMPLETED_QUEUE_URL}" >> .env
+          echo "HUME_POLL_INTERVAL=3" >> .env
+          echo "HUME_MAX_POLL_ATTEMPTS=40" >> .env
+          echo "HUME_CONFIDENCE_THRESHOLD=0.5" >> .env
+        ENDSSH
+        ssh ${EC2_USER}@${EC2_HOST} "echo '✅ .env file created/updated successfully' && wc -l /home/ubuntu/emotion-analysis-hume/.env"
+
+    - name: Deploy to EC2 instance
+      env:
+        EC2_HOST: ${{ secrets.EC2_HOST }}
+        EC2_USER: ${{ secrets.EC2_USER }}
+      run: |
+        echo "🚀 Starting deployment to EC2..."
+        ssh ${EC2_USER}@${EC2_HOST} << 'ENDSSH'
+          set -e
+          echo "📦 Navigating to application directory..."
+          cd /home/ubuntu/emotion-analysis-hume
+
+          echo "🗑️ Cleaning up old containers..."
+          docker-compose -f docker-compose.prod.yml down || true
+
+          echo "🔄 Running deployment script..."
+          ./run-prod.sh
+
+          echo "✅ Deployment script completed"
+
+          echo "📊 Checking container status..."
+          docker ps | grep emotion-analysis-hume || echo "⚠️ Container not found"
+
+          echo "🏥 Running health check..."
+          for i in {1..12}; do
+            if curl -f http://localhost:8019/health > /dev/null 2>&1; then
+              echo "✅ Health check passed (attempt $i/12)"
+              break
+            fi
+            echo "  Attempt $i/12 failed, retrying in 5 seconds..."
+            sleep 5
+          done
+
+          curl -f http://localhost:8019/health || echo "⚠️ Health check failed after 12 attempts"
+        ENDSSH
+        echo "✅ EC2 deployment completed successfully!"
+
+    - name: Deployment Success Notification
+      if: success()
+      run: |
+        echo "🎉 Full CI/CD pipeline completed successfully!"
+        echo "📦 Service: emotion-analysis-hume (Hume AI v3)"
+        echo "🌐 URL: https://api.hey-watch.me/emotion-analysis/hume/"
+        echo "🏷️ Version: ${{ github.sha }}"
+
+    - name: Deployment Failure Notification
+      if: failure()
+      run: |
+        echo "❌ EC2 deployment failed!"
+        echo "Please check the SSH connection and server logs."
