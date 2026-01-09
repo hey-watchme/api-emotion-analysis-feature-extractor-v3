@@ -33,12 +33,9 @@ class HumeProvider:
         self.secret_key = secret_key
         self.base_url = "https://api.hume.ai/v0/batch"
 
-        # Create auth token (base64 encoded api_key:secret_key)
-        auth_string = f"{api_key}:{secret_key}"
-        self.auth_token = base64.b64encode(auth_string.encode()).decode()
-
+        # Hume API uses X-Hume-Api-Key header for authentication
         self.headers = {
-            "Authorization": f"Basic {self.auth_token}",
+            "X-Hume-Api-Key": api_key,
             "Content-Type": "application/json"
         }
 

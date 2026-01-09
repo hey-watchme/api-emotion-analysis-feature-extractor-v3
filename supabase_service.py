@@ -62,8 +62,7 @@ class SupabaseService:
         try:
             # Update emotion_status column
             response = self.client.table('spot_features').update({
-                'emotion_status': status,
-                'updated_at': datetime.utcnow().isoformat()
+                'emotion_status': status
             }).eq('device_id', device_id).eq('recorded_at', recorded_at).execute()
 
             if response.data:
@@ -96,7 +95,7 @@ class SupabaseService:
         """
         try:
             # Check if record exists
-            existing = self.client.table('spot_features').select('id').eq(
+            existing = self.client.table('spot_features').select('device_id').eq(
                 'device_id', device_id
             ).eq('recorded_at', recorded_at).execute()
 
@@ -108,9 +107,7 @@ class SupabaseService:
                     'device_id': device_id,
                     'recorded_at': recorded_at,
                     'emotion_features_result_hume': emotion_data,
-                    'emotion_status': 'completed' if not emotion_data.get('error') else 'failed',
-                    'created_at': datetime.utcnow().isoformat(),
-                    'updated_at': datetime.utcnow().isoformat()
+                    'emotion_status': 'completed' if not emotion_data.get('error') else 'failed'
                 }).execute()
 
                 if response.data:
@@ -120,8 +117,7 @@ class SupabaseService:
                 # Update existing record
                 response = self.client.table('spot_features').update({
                     'emotion_features_result_hume': emotion_data,
-                    'emotion_status': 'completed' if not emotion_data.get('error') else 'failed',
-                    'updated_at': datetime.utcnow().isoformat()
+                    'emotion_status': 'completed' if not emotion_data.get('error') else 'failed'
                 }).eq('device_id', device_id).eq('recorded_at', recorded_at).execute()
 
                 if response.data:
