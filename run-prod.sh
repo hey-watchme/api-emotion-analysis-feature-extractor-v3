@@ -26,25 +26,25 @@ echo "🔐 Logging into Amazon ECR..."
 aws ecr get-login-password --region ap-southeast-2 | docker login --username AWS --password-stdin 754724220380.dkr.ecr.ap-southeast-2.amazonaws.com
 
 echo "📥 Pulling latest image from ECR (forced)..."
-docker pull --platform linux/arm64 754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-emotion-analysis-hume:latest
+docker pull --platform linux/arm64 754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-emotion-analysis-feature-extractor:latest
 
 # Verify pulled image
 echo "✅ Image pulled successfully:"
-docker images | grep watchme-emotion-analysis-hume | head -1
+docker images | grep watchme-emotion-analysis-feature-extractor | head -1
 
 # Remove existing containers
 echo "🗑️ Removing existing containers..."
 
 # 1. Remove running containers
-RUNNING_CONTAINERS=$(docker ps -q --filter "name=emotion-analysis-hume")
+RUNNING_CONTAINERS=$(docker ps -q --filter "name=emotion-analysis-feature-extractor")
 if [ ! -z "$RUNNING_CONTAINERS" ]; then
-    echo "  Stopping running containers (emotion-analysis-hume)..."
+    echo "  Stopping running containers (emotion-analysis-feature-extractor)..."
     docker stop $RUNNING_CONTAINERS
 fi
 
-ALL_CONTAINERS=$(docker ps -aq --filter "name=emotion-analysis-hume")
+ALL_CONTAINERS=$(docker ps -aq --filter "name=emotion-analysis-feature-extractor")
 if [ ! -z "$ALL_CONTAINERS" ]; then
-    echo "  Removing all containers (emotion-analysis-hume)..."
+    echo "  Removing all containers (emotion-analysis-feature-extractor)..."
     docker rm -f $ALL_CONTAINERS
 fi
 
@@ -63,13 +63,13 @@ echo "⏳ Waiting for container to start..."
 sleep 10
 
 # Check container status
-if docker ps | grep -q emotion-analysis-hume; then
+if docker ps | grep -q emotion-analysis-feature-extractor; then
     echo "✅ Container is running"
-    docker ps | grep emotion-analysis-hume
+    docker ps | grep emotion-analysis-feature-extractor
 else
     echo "❌ Container failed to start"
     echo "Recent logs:"
-    docker logs emotion-analysis-hume --tail 50 || true
+    docker logs emotion-analysis-feature-extractor --tail 50 || true
     exit 1
 fi
 
@@ -77,7 +77,7 @@ fi
 echo "🏥 Running health check..."
 echo "⏳ Waiting for API to be ready..."
 for i in {1..12}; do
-    if curl -f http://localhost:8019/health > /dev/null 2>&1; then
+    if curl -f http://localhost:8018/health > /dev/null 2>&1; then
         echo "✅ Health check passed"
         echo "🎉 Deployment completed successfully!"
         exit 0
@@ -88,5 +88,5 @@ done
 
 echo "⚠️ Health check failed after 12 attempts (60 seconds)"
 echo "Container logs:"
-docker logs emotion-analysis-hume --tail 50
+docker logs emotion-analysis-feature-extractor --tail 50
 exit 1

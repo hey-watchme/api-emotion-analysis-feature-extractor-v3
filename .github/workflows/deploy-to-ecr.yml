@@ -8,7 +8,7 @@ on:
 
 env:
   AWS_REGION: ap-southeast-2
-  ECR_REPOSITORY: watchme-emotion-analysis-hume
+  ECR_REPOSITORY: watchme-emotion-analysis-feature-extractor
 
 jobs:
   deploy:
@@ -103,7 +103,7 @@ jobs:
         EC2_USER: ${{ secrets.EC2_USER }}
       run: |
         echo "📁 Creating application directory on EC2..."
-        ssh ${EC2_USER}@${EC2_HOST} "mkdir -p /home/ubuntu/emotion-analysis-hume"
+        ssh ${EC2_USER}@${EC2_HOST} "mkdir -p /home/ubuntu/emotion-analysis-feature-extractor"
         echo "✅ Directory created/verified"
 
     - name: Update configuration files on EC2
@@ -112,9 +112,9 @@ jobs:
         EC2_USER: ${{ secrets.EC2_USER }}
       run: |
         echo "📦 Updating configuration files on EC2..."
-        scp -o StrictHostKeyChecking=no docker-compose.prod.yml ${EC2_USER}@${EC2_HOST}:/home/ubuntu/emotion-analysis-hume/
-        scp -o StrictHostKeyChecking=no run-prod.sh ${EC2_USER}@${EC2_HOST}:/home/ubuntu/emotion-analysis-hume/
-        ssh ${EC2_USER}@${EC2_HOST} "chmod +x /home/ubuntu/emotion-analysis-hume/run-prod.sh"
+        scp -o StrictHostKeyChecking=no docker-compose.prod.yml ${EC2_USER}@${EC2_HOST}:/home/ubuntu/emotion-analysis-feature-extractor/
+        scp -o StrictHostKeyChecking=no run-prod.sh ${EC2_USER}@${EC2_HOST}:/home/ubuntu/emotion-analysis-feature-extractor/
+        ssh ${EC2_USER}@${EC2_HOST} "chmod +x /home/ubuntu/emotion-analysis-feature-extractor/run-prod.sh"
         echo "✅ Configuration files updated"
 
     - name: Create/Update .env file on EC2
@@ -131,7 +131,7 @@ jobs:
       run: |
         echo "📝 Creating/Updating .env file on EC2..."
         ssh ${EC2_USER}@${EC2_HOST} << ENDSSH
-          cd /home/ubuntu/emotion-analysis-hume
+          cd /home/ubuntu/emotion-analysis-feature-extractor
           echo "HUME_API_KEY=${HUME_API_KEY}" > .env
           echo "HUME_SECRET_KEY=${HUME_SECRET_KEY}" >> .env
           echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}" >> .env
@@ -145,7 +145,7 @@ jobs:
           echo "HUME_MAX_POLL_ATTEMPTS=40" >> .env
           echo "HUME_CONFIDENCE_THRESHOLD=0.5" >> .env
         ENDSSH
-        ssh ${EC2_USER}@${EC2_HOST} "echo '✅ .env file created/updated successfully' && wc -l /home/ubuntu/emotion-analysis-hume/.env"
+        ssh ${EC2_USER}@${EC2_HOST} "echo '✅ .env file created/updated successfully' && wc -l /home/ubuntu/emotion-analysis-feature-extractor/.env"
 
     - name: Deploy to EC2 instance
       env:
@@ -156,7 +156,7 @@ jobs:
         ssh ${EC2_USER}@${EC2_HOST} << 'ENDSSH'
           set -e
           echo "📦 Navigating to application directory..."
-          cd /home/ubuntu/emotion-analysis-hume
+          cd /home/ubuntu/emotion-analysis-feature-extractor
 
           echo "🗑️ Cleaning up old containers..."
           docker-compose -f docker-compose.prod.yml down || true
@@ -167,11 +167,11 @@ jobs:
           echo "✅ Deployment script completed"
 
           echo "📊 Checking container status..."
-          docker ps | grep emotion-analysis-hume || echo "⚠️ Container not found"
+          docker ps | grep emotion-analysis-feature-extractor || echo "⚠️ Container not found"
 
           echo "🏥 Running health check..."
           for i in {1..12}; do
-            if curl -f http://localhost:8019/health > /dev/null 2>&1; then
+            if curl -f http://localhost:8018/health > /dev/null 2>&1; then
               echo "✅ Health check passed (attempt $i/12)"
               break
             fi
@@ -179,7 +179,7 @@ jobs:
             sleep 5
           done
 
-          curl -f http://localhost:8019/health || echo "⚠️ Health check failed after 12 attempts"
+          curl -f http://localhost:8018/health || echo "⚠️ Health check failed after 12 attempts"
         ENDSSH
         echo "✅ EC2 deployment completed successfully!"
 
@@ -187,8 +187,8 @@ jobs:
       if: success()
       run: |
         echo "🎉 Full CI/CD pipeline completed successfully!"
-        echo "📦 Service: emotion-analysis-hume (Hume AI v3)"
-        echo "🌐 URL: https://api.hey-watch.me/emotion-analysis/hume/"
+        echo "📦 Service: emotion-analysis-feature-extractor (Hume AI v3)"
+        echo "🌐 URL: https://api.hey-watch.me/emotion-analysis/features/"
         echo "🏷️ Version: ${{ github.sha }}"
 
     - name: Deployment Failure Notification

@@ -1,11 +1,11 @@
 version: '3.8'
 
 services:
-  emotion-analysis-hume:
-    image: 754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-emotion-analysis-hume:latest
-    container_name: emotion-analysis-hume
+  emotion-analysis-feature-extractor:
+    image: 754724220380.dkr.ecr.ap-southeast-2.amazonaws.com/watchme-emotion-analysis-feature-extractor:latest
+    container_name: emotion-analysis-feature-extractor
     ports:
-      - "127.0.0.1:8019:8019"
+      - "127.0.0.1:8018:8018"
     environment:
       # Hume API
       - HUME_API_KEY=${HUME_API_KEY}
@@ -28,12 +28,12 @@ services:
       - SUPABASE_KEY=${SUPABASE_KEY}
 
       # API
-      - API_PORT=8019
+      - API_PORT=8018
     networks:
       - watchme-network
     restart: always
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8019/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8018/health"]
       interval: 30s
       timeout: 10s
       retries: 3
