@@ -67,7 +67,10 @@ class HumeProvider:
                     "identify_speakers": False
                 },
                 "burst": {},  # Vocal burst detection
-                "language": {}  # Text emotion analysis
+                "language": {
+                    "granularity": "sentence",  # sentence-level for better Japanese support
+                    "identify_speakers": False
+                }
             },
             "transcription": {
                 "language": language,
