@@ -1,16 +1,10 @@
 # Hume AI Emotion Recognition API v3
 
-## ⚠️ 現在の状況（2026-01-09）
+## Status: Active
 
-**🔴 感情分析機能は現在停止中です**
-
-- **理由**: Hume APIフリープラン（課金回避のため一時停止）
-- **停止方法**: Lambda ser-workerのエンドポイントURLを無効化（`https://api.hey-watch.me-disabled`）
-- **影響範囲**:
-  - ❌ 自動感情分析が実行されない（録音時の感情分析なし）
-  - ✅ 他のAPI（ASR文字起こし、SED音響検出）は継続動作
-  - ✅ APIコンテナは稼働中（手動テスト可能）
-- **再開方法**: [KNOWN_ISSUES.md - 一時停止方法](../../server-configs/docs/KNOWN_ISSUES.md#一時停止方法hume-api課金回避) 参照
+- Spot pipeline (SER) is running with queue-first operation
+- `/async-process` enqueues to `watchme-ser-job-queue-v1.fifo`, returns 202 immediately
+- Queue consumer thread processes jobs and sends completion to `watchme-feature-completed-queue`
 
 ---
 
@@ -153,15 +147,15 @@ GitHub Actionsが自動的に:
 ssh -i ~/watchme-key.pem ubuntu@3.24.16.82
 
 # サービスディレクトリに移動
-cd /home/ubuntu/emotion-analysis-hume
+cd /home/ubuntu/emotion-analysis-feature-extractor
 
 # コンテナ再起動
-docker-compose down
-docker-compose pull
-docker-compose up -d
+docker-compose -f docker-compose.prod.yml down
+docker-compose -f docker-compose.prod.yml pull
+docker-compose -f docker-compose.prod.yml up -d
 
 # ログ確認
-docker logs emotion-analysis-hume -f
+docker logs emotion-analysis-feature-extractor -f
 ```
 
 ## データベース
@@ -199,6 +193,11 @@ docker logs emotion-analysis-hume -f
 - `SUPABASE_URL`: SupabaseプロジェクトURL
 - `SUPABASE_KEY`: Supabase Service Role Key
 - `HUME_CONFIDENCE_THRESHOLD`: 文字起こし信頼度閾値（デフォルト: 0.5）
+- `SER_JOB_QUEUE_ENABLED`: queue-first mode (default: `true`)
+- `SER_JOB_QUEUE_URL`: SER FIFO queue URL
+- `SER_JOB_QUEUE_WAIT_SECONDS`: queue long-poll interval (default: `20`)
+- `SER_JOB_QUEUE_VISIBILITY_TIMEOUT`: SQS visibility timeout (default: `600`)
+- `SER_ALLOW_IN_PROCESS_FALLBACK`: in-process fallback (default: `false`)
 
 ---
 
@@ -335,29 +334,10 @@ unable to transcribe file: transcript confidence (0.0) below threshold value (0.
 
 **解決**: `language: "ja"` を明示的に設定
 
-## 実装状況（2026-01-09）
+## 💰 コスト
 
-### ✅ 完了
-- Hume AI v3実装完了（Speech Prosody + Vocal Burst + Language）
-- v2完全置き換え（同ECR/ポート/コンテナ名）
-- GitHub Actions CI/CD設定
-- EC2デプロイ成功
-- Supabase `emotion_features_result_hume` カラム追加完了
-
-### ⚠️ 修正済み問題
-1. **Hume API認証**: Basic認証→`X-Hume-Api-Key`ヘッダーに修正
-2. **Supabase**: `updated_at`/`id`カラム参照を削除
-3. **環境変数**: 手動で`.env`修正（GitHub Actions変数渡しに問題）
-
-### 🧪 テスト状況
-- ヘルスチェック: ✅ `status: healthy`
-- `/async-process`: ✅ 202 Accepted返却
-- **次回デプロイ後に実音声でテスト必要**
-
-### 💰 コスト
 - **$0.0639/分**（Audio: Prosody+Burst+Language+Transcription）
 - 1デバイス（48分/日）: **$92.1/月**
-- フリープラン制限は要確認
 
 ## トラブルシューティング
 
@@ -388,4 +368,4 @@ docker logs emotion-analysis-feature-extractor --tail 100
 
 ---
 
-最終更新: 2026-01-09
+最終更新: 2026-03-08
