@@ -361,8 +361,9 @@ GET /health
 
 ```env
 # Hume API
-HUME_API_KEY=KfIbNPRXVKeeroy7ulb67yzey6L6l9DDl45VODugUdBpGmln
-HUME_SECRET_KEY=moe38Y09igpLd0a3gU3BCMfBGuv0f2rSdwuGJReJVX1DVwxYYUfoumPTAS2GBdoc
+# ⚠️ セキュリティ: APIキーはGitHub Secretsに保存済み
+HUME_API_KEY=<GitHub Secretsに保存>
+HUME_SECRET_KEY=<GitHub Secretsに保存>
 
 # AWS
 AWS_ACCESS_KEY_ID=

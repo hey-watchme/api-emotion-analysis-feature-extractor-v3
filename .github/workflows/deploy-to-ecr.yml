@@ -144,6 +144,10 @@ jobs:
           echo "HUME_POLL_INTERVAL=3" >> .env
           echo "HUME_MAX_POLL_ATTEMPTS=40" >> .env
           echo "HUME_CONFIDENCE_THRESHOLD=0.5" >> .env
+          echo "SER_JOB_QUEUE_ENABLED=true" >> .env
+          echo "SER_JOB_QUEUE_URL=https://sqs.ap-southeast-2.amazonaws.com/754724220380/watchme-ser-job-queue-v1.fifo" >> .env
+          echo "SER_JOB_QUEUE_WAIT_SECONDS=20" >> .env
+          echo "SER_JOB_QUEUE_VISIBILITY_TIMEOUT=600" >> .env
         ENDSSH
         ssh ${EC2_USER}@${EC2_HOST} "echo '✅ .env file created/updated successfully' && wc -l /home/ubuntu/emotion-analysis-feature-extractor/.env"
 

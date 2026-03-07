@@ -49,31 +49,24 @@ class SupabaseService:
         status: str
     ) -> bool:
         """
-        Update emotion processing status in spot_features table
-
-        Args:
-            device_id: Device identifier
-            recorded_at: Recording timestamp
-            status: Processing status (processing, completed, failed)
-
-        Returns:
-            Success status
+        Upsert emotion processing status in spot_features table.
+        Uses upsert so the record is created if it does not yet exist.
         """
         try:
-            # Update emotion_status column
-            response = self.client.table('spot_features').update({
+            payload = {
+                'device_id': device_id,
+                'recorded_at': recorded_at,
                 'emotion_status': status
-            }).eq('device_id', device_id).eq('recorded_at', recorded_at).execute()
-
-            if response.data:
-                logger.info(f"Updated emotion_status to {status} for {device_id}")
-                return True
-            else:
-                logger.warning(f"No record found to update for {device_id} at {recorded_at}")
-                return False
+            }
+            self.client.table('spot_features').upsert(
+                payload,
+                on_conflict='device_id,recorded_at'
+            ).execute()
+            logger.info(f"Upserted emotion_status to {status} for {device_id}")
+            return True
 
         except Exception as e:
-            logger.error(f"Failed to update emotion_status: {e}")
+            logger.error(f"Failed to upsert emotion_status: {e}")
             return False
 
     async def save_emotion_features(

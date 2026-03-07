@@ -1,16 +1,20 @@
 """
 Hume AI Emotion Recognition API v3
-Main FastAPI application
+Main FastAPI application - queue-first operation
 """
 
 import os
 import json
 import asyncio
+import hashlib
 import logging
+import time
+import threading
 from typing import Optional
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, status
+from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -26,17 +30,14 @@ from app.models import (
 from app.hume_provider import HumeProvider
 from supabase_service import SupabaseService
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
 load_dotenv()
 
-# FastAPI application
 app = FastAPI(
     title="Hume AI Emotion Recognition API",
     description="48-emotion analysis using Hume AI Speech Prosody, Vocal Burst, and Language models",
@@ -45,7 +46,6 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -60,24 +60,52 @@ supabase_service: Optional[SupabaseService] = None
 sqs_client = None
 s3_client = None
 
-# SQS Queue URL
 FEATURE_COMPLETED_QUEUE_URL = os.getenv(
     'FEATURE_COMPLETED_QUEUE_URL',
     'https://sqs.ap-southeast-2.amazonaws.com/754724220380/watchme-feature-completed-queue'
 )
 
-# S3 configuration
 S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME', 'watchme-vault')
 AWS_REGION = os.getenv('AWS_REGION', 'ap-southeast-2')
+
+
+def _read_bool(env_name: str, default: bool = False) -> bool:
+    raw_value = os.environ.get(env_name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _read_max_workers(env_name: str, default: int = 1) -> int:
+    raw_value = os.environ.get(env_name, str(default))
+    try:
+        return max(1, int(raw_value))
+    except ValueError:
+        return default
+
+
+SER_JOB_QUEUE_URL = os.environ.get(
+    "SER_JOB_QUEUE_URL",
+    "https://sqs.ap-southeast-2.amazonaws.com/754724220380/watchme-ser-job-queue-v1.fifo",
+)
+SER_JOB_QUEUE_ENABLED = _read_bool("SER_JOB_QUEUE_ENABLED", True)
+SER_ALLOW_IN_PROCESS_FALLBACK = _read_bool("SER_ALLOW_IN_PROCESS_FALLBACK", False)
+SER_JOB_QUEUE_WAIT_SECONDS = max(1, min(20, int(os.environ.get("SER_JOB_QUEUE_WAIT_SECONDS", "20"))))
+SER_JOB_QUEUE_VISIBILITY_TIMEOUT = max(60, int(os.environ.get("SER_JOB_QUEUE_VISIBILITY_TIMEOUT", "600")))
+SER_ASYNC_JOB_WORKERS = _read_max_workers("SER_ASYNC_JOB_WORKERS", 1)
+
+ser_async_executor = ThreadPoolExecutor(max_workers=SER_ASYNC_JOB_WORKERS)
+ser_queue_worker_stop_event = threading.Event()
+ser_queue_worker_thread: Optional[threading.Thread] = None
 
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup"""
     global hume_provider, supabase_service, sqs_client, s3_client
+    global ser_queue_worker_thread
 
     try:
-        # Initialize Hume Provider
         hume_api_key = os.getenv('HUME_API_KEY')
         hume_secret_key = os.getenv('HUME_SECRET_KEY')
 
@@ -88,7 +116,6 @@ async def startup_event():
         hume_provider = HumeProvider(hume_api_key, hume_secret_key)
         logger.info("Hume Provider initialized successfully")
 
-        # Initialize Supabase
         supabase_url = os.getenv('SUPABASE_URL')
         supabase_key = os.getenv('SUPABASE_KEY')
 
@@ -98,20 +125,16 @@ async def startup_event():
         else:
             logger.warning("Supabase credentials not found - running without database")
 
-        # Initialize AWS clients
         aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
         aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
 
         if aws_access_key and aws_secret_key:
-            # S3 client
             s3_client = boto3.client(
                 's3',
                 aws_access_key_id=aws_access_key,
                 aws_secret_access_key=aws_secret_key,
                 region_name=AWS_REGION
             )
-
-            # SQS client
             sqs_client = boto3.client(
                 'sqs',
                 aws_access_key_id=aws_access_key,
@@ -124,7 +147,27 @@ async def startup_event():
 
     except Exception as e:
         logger.error(f"Failed to initialize services: {e}")
-        # Continue running even if some services fail to initialize
+
+    if SER_JOB_QUEUE_ENABLED and SER_JOB_QUEUE_URL and sqs_client:
+        ser_queue_worker_stop_event.clear()
+        ser_queue_worker_thread = threading.Thread(
+            target=_consume_ser_job_queue,
+            name="ser-job-queue-worker",
+            daemon=True,
+        )
+        ser_queue_worker_thread.start()
+        logger.info(f"SER queue worker started: {SER_JOB_QUEUE_URL}")
+    else:
+        logger.info("SER queue worker disabled")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop queue worker thread and executor on shutdown"""
+    ser_queue_worker_stop_event.set()
+    if ser_queue_worker_thread and ser_queue_worker_thread.is_alive():
+        ser_queue_worker_thread.join(timeout=2)
+    ser_async_executor.shutdown(wait=False, cancel_futures=False)
 
 
 @app.get("/", response_model=dict)
@@ -169,43 +212,139 @@ async def health_check():
         )
 
 
-@app.post("/async-process",
-          status_code=status.HTTP_202_ACCEPTED,
-          response_model=AsyncProcessResponse)
-async def async_process(
-    request: AsyncProcessRequest,
-    background_tasks: BackgroundTasks
-):
+@app.post("/async-process", status_code=status.HTTP_202_ACCEPTED)
+async def async_process(request: AsyncProcessRequest):
     """
-    Asynchronous emotion analysis endpoint
-    Returns 202 Accepted immediately and processes in background
+    Queue-first async endpoint.
+    Enqueues to SER job queue and returns 202.
+    Falls back to in-process executor only when explicitly allowed.
     """
-    logger.info(f"Starting async processing for {request.device_id} at {request.recorded_at}")
+    logger.info(f"async-process request: {request.device_id} at {request.recorded_at}")
 
-    # Validate services
     if not hume_provider:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Hume Provider not initialized"
         )
 
-    if not supabase_service:
-        logger.warning("Processing without database - results will not be saved")
+    if not SER_JOB_QUEUE_ENABLED or not SER_JOB_QUEUE_URL or not sqs_client:
+        if not SER_ALLOW_IN_PROCESS_FALLBACK:
+            raise HTTPException(status_code=503, detail="SER queue mode is disabled or misconfigured")
+        if supabase_service:
+            await supabase_service.update_emotion_status(request.device_id, request.recorded_at, "processing")
+        ser_async_executor.submit(
+            _run_process_in_background,
+            request.file_path, request.device_id, request.recorded_at
+        )
+        return {
+            "status": "accepted",
+            "message": "Processing started in background",
+            "transport": "in_process_executor",
+            "device_id": request.device_id,
+            "recorded_at": request.recorded_at,
+        }
 
-    # Add background task
-    background_tasks.add_task(
-        process_emotion_analysis,
-        request.file_path,
-        request.device_id,
-        request.recorded_at
-    )
+    try:
+        if supabase_service:
+            await supabase_service.update_emotion_status(request.device_id, request.recorded_at, "queued")
+        _enqueue_ser_job(
+            file_path=request.file_path,
+            device_id=request.device_id,
+            recorded_at=request.recorded_at,
+            trigger_source="ser-worker",
+        )
+    except Exception as e:
+        logger.error(f"Failed to enqueue SER job: {e}")
+        if not SER_ALLOW_IN_PROCESS_FALLBACK:
+            raise HTTPException(status_code=503, detail="Failed to enqueue SER job")
+        ser_async_executor.submit(
+            _run_process_in_background,
+            request.file_path, request.device_id, request.recorded_at
+        )
+        return {
+            "status": "accepted",
+            "message": "Processing started in background (fallback)",
+            "transport": "in_process_executor",
+            "device_id": request.device_id,
+            "recorded_at": request.recorded_at,
+        }
 
-    return AsyncProcessResponse(
-        status="accepted",
-        message="Emotion analysis started in background",
-        device_id=request.device_id,
-        recorded_at=request.recorded_at
-    )
+    return {
+        "status": "accepted",
+        "message": "Processing queued",
+        "transport": "sqs",
+        "device_id": request.device_id,
+        "recorded_at": request.recorded_at,
+    }
+
+
+def _enqueue_ser_job(*, file_path: str, device_id: str, recorded_at: str, trigger_source: str) -> None:
+    """Enqueue an emotion analysis job to the SER FIFO queue."""
+    payload = {
+        "file_path": file_path,
+        "device_id": device_id,
+        "recorded_at": recorded_at,
+        "feature_type": "emotion",
+        "trigger_source": trigger_source,
+        "queued_at": int(time.time()),
+    }
+
+    send_kwargs = {
+        "QueueUrl": SER_JOB_QUEUE_URL,
+        "MessageBody": json.dumps(payload),
+    }
+
+    if SER_JOB_QUEUE_URL.endswith(".fifo"):
+        dedupe_input = f"{device_id}:{recorded_at}:{file_path}:emotion"
+        send_kwargs["MessageGroupId"] = f"{device_id}-emotion"
+        send_kwargs["MessageDeduplicationId"] = hashlib.sha256(dedupe_input.encode("utf-8")).hexdigest()[:80]
+
+    sqs_client.send_message(**send_kwargs)
+    logger.info(f"Enqueued SER job: {device_id}/{recorded_at}")
+
+
+def _consume_ser_job_queue() -> None:
+    """Long-running thread that polls the SER job queue and processes messages."""
+    logger.info("SER queue consumer loop started")
+
+    while not ser_queue_worker_stop_event.is_set():
+        try:
+            response = sqs_client.receive_message(
+                QueueUrl=SER_JOB_QUEUE_URL,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=SER_JOB_QUEUE_WAIT_SECONDS,
+                VisibilityTimeout=SER_JOB_QUEUE_VISIBILITY_TIMEOUT,
+            )
+            messages = response.get("Messages", [])
+            if not messages:
+                continue
+
+            for message in messages:
+                receipt_handle = message["ReceiptHandle"]
+                body = json.loads(message["Body"])
+
+                file_path = body["file_path"]
+                device_id = body["device_id"]
+                recorded_at = body["recorded_at"]
+
+                try:
+                    asyncio.run(process_emotion_analysis(file_path, device_id, recorded_at))
+                    sqs_client.delete_message(QueueUrl=SER_JOB_QUEUE_URL, ReceiptHandle=receipt_handle)
+                    logger.info(f"SER queue job done: {device_id}/{recorded_at}")
+                except Exception as e:
+                    logger.error(f"SER queue job failed (will retry): {device_id}/{recorded_at} - {e}")
+
+        except Exception as e:
+            logger.error(f"SER queue consumer error: {e}")
+            time.sleep(2)
+
+
+def _run_process_in_background(file_path: str, device_id: str, recorded_at: str):
+    """Wrapper for ThreadPoolExecutor fallback path."""
+    try:
+        asyncio.run(process_emotion_analysis(file_path, device_id, recorded_at))
+    except Exception as e:
+        logger.error(f"Background runner crashed for {device_id}/{recorded_at}: {e}")
 
 
 async def process_emotion_analysis(
@@ -213,20 +352,16 @@ async def process_emotion_analysis(
     device_id: str,
     recorded_at: str
 ):
-    """
-    Background task for emotion analysis
-    """
+    """Core emotion analysis logic using Hume AI."""
     start_time = datetime.utcnow()
     job_id = None
 
     try:
-        # Update status to processing
         if supabase_service:
             await supabase_service.update_emotion_status(
                 device_id, recorded_at, "processing"
             )
 
-        # Generate presigned URL for S3 file
         if not s3_client:
             raise Exception("S3 client not initialized")
 
@@ -237,32 +372,24 @@ async def process_emotion_analysis(
         )
         logger.info(f"Generated presigned URL for {file_path}")
 
-        # Submit job to Hume API
         job_id = await hume_provider.create_job(
             audio_url=presigned_url,
-            language="ja"  # Japanese language for better STT
+            language="ja"
         )
         logger.info(f"Created Hume job: {job_id}")
 
-        # Poll for job completion
         result = await hume_provider.wait_for_job(job_id)
 
         if not result:
             raise Exception("Job completed but no results returned")
 
-        # Process and save results
         processing_time = (datetime.utcnow() - start_time).total_seconds()
-
-        # Parse Hume results
         parsed_result = await hume_provider.parse_results(result)
 
-        # Check if we got valid emotion data
         if not parsed_result or parsed_result.get('total_segments', 0) == 0:
-            # Low quality audio - no emotion data available
             logger.warning(f"No emotion data extracted for {file_path} - likely low quality audio")
 
             if supabase_service:
-                # Save empty result with error flag
                 await supabase_service.save_emotion_features(
                     device_id=device_id,
                     recorded_at=recorded_at,
@@ -273,32 +400,27 @@ async def process_emotion_analysis(
                         "processing_time": processing_time
                     }
                 )
-
                 await supabase_service.update_emotion_status(
                     device_id, recorded_at, "failed"
                 )
         else:
-            # Valid emotion data
             logger.info(f"Extracted {parsed_result['total_segments']} segments with emotion data")
 
             if supabase_service:
-                # Save to database
                 await supabase_service.save_emotion_features(
                     device_id=device_id,
                     recorded_at=recorded_at,
                     emotion_data=parsed_result
                 )
-
                 await supabase_service.update_emotion_status(
                     device_id, recorded_at, "completed"
                 )
 
-        # Send SQS notification
         if sqs_client:
-            await send_completion_notification(
+            _send_completion_notification(
                 device_id=device_id,
                 recorded_at=recorded_at,
-                status="completed" if parsed_result else "failed",
+                notify_status="completed" if parsed_result else "failed",
                 segments=parsed_result.get('total_segments', 0) if parsed_result else 0
             )
 
@@ -307,13 +429,10 @@ async def process_emotion_analysis(
     except Exception as e:
         logger.error(f"Failed to process {file_path}: {str(e)}")
 
-        # Update status to failed
         if supabase_service:
             await supabase_service.update_emotion_status(
                 device_id, recorded_at, "failed"
             )
-
-            # Save error information
             await supabase_service.save_emotion_features(
                 device_id=device_id,
                 recorded_at=recorded_at,
@@ -325,30 +444,29 @@ async def process_emotion_analysis(
                 }
             )
 
-        # Send error notification
         if sqs_client:
-            await send_completion_notification(
+            _send_completion_notification(
                 device_id=device_id,
                 recorded_at=recorded_at,
-                status="failed",
+                notify_status="failed",
                 error=str(e)
             )
 
 
-async def send_completion_notification(
+def _send_completion_notification(
     device_id: str,
     recorded_at: str,
-    status: str,
+    notify_status: str,
     segments: int = 0,
     error: Optional[str] = None
 ):
-    """Send completion notification to SQS"""
+    """Send completion notification to feature-completed-queue (synchronous)."""
     try:
         message = {
             "device_id": device_id,
             "recorded_at": recorded_at,
             "feature_type": "emotion",
-            "status": status,
+            "status": notify_status,
             "provider": "hume",
             "segments": segments,
             "timestamp": datetime.utcnow().isoformat()
@@ -361,7 +479,7 @@ async def send_completion_notification(
             QueueUrl=FEATURE_COMPLETED_QUEUE_URL,
             MessageBody=json.dumps(message)
         )
-        logger.info(f"Sent SQS notification for {device_id}: {status}")
+        logger.info(f"Sent SQS notification for {device_id}: {notify_status}")
 
     except Exception as e:
         logger.error(f"Failed to send SQS notification: {e}")
